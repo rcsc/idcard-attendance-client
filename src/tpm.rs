@@ -1,5 +1,11 @@
 use rand::prelude::*;
-use std::{convert::TryFrom, fs::File, path::PathBuf};
+use rand_chacha::rand_core::SeedableRng;
+use serde::{Deserialize, Serialize};
+use std::{
+    convert::{TryFrom, TryInto},
+    fs::File,
+    path::PathBuf,
+};
 use tss_esapi::{
     abstraction::cipher::Cipher,
     attributes::ObjectAttributesBuilder,
@@ -13,43 +19,51 @@ use tss_esapi::{
     Context,
 };
 
+#[derive(Serialize, Deserialize)]
+pub struct AESEncryptionData {
+    initialisation_vector: [u8; 16],
+    encrypted_bytes: Vec<u8>,
+}
+
 // Generates an IV, takes a u8 vec and encrypts it with
 // the provided key.
 pub fn aes_encrypt(
     ctx: &mut Context,
     aes_key: KeyHandle,
     data: Vec<u8>,
-) -> Result<(MaxBuffer, InitialValue), Box<dyn std::error::Error>> {
+) -> Result<AESEncryptionData, Box<dyn std::error::Error>> {
     let data_maxbuffer = MaxBuffer::try_from(data)?;
 
     // Randomly generate an IV --- 128 bit (16 byte) array
-    let iv: [u8; 16] = rand::random();
-    // InitialValue wants a Vec when we try to call encrypt_decrypt_2, so we have to convert
-    // rand's output to a Vec.
-    let iv = Vec::from(iv);
+    // We use an CSPRNG to make the IV more secure (or something like that).
+    let mut randomizer = rand_chacha::ChaChaRng::from_entropy();
+    let iv: [u8; 16] = randomizer.gen();
 
     // Keep this so we can return it later.
-    let iv = InitialValue::try_from(iv).unwrap();
+    let iv = InitialValue::try_from(Vec::from(iv)).unwrap();
 
-    Ok((
-        ctx.encrypt_decrypt_2(
-            aes_key,
-            false, // this parameter is true when we want to decrypt and false when we want to encrypt
-            // https://stackoverflow.com/questions/1220751/how-to-choose-an-aes-encryption-mode-cbc-ecb-ctr-ocb-cfb
-            // for a decision to use CTR
-            //
-            // NOTE: If you create the AES key with a different mode than what you use here
-            // (eg. make an aes-cfb key and use CTR mode here),
-            // you will likely get an "Esys Finish ErrorCode 0x000003c9."
-            SymmetricMode::Ctr,
-            &data_maxbuffer,
-            &iv,
-        )?
-        .0,
+    Ok(AESEncryptionData {
+        encrypted_bytes: ctx
+            .encrypt_decrypt_2(
+                aes_key,
+                false, // this parameter is true when we want to decrypt and false when we want to encrypt
+                // https://stackoverflow.com/questions/1220751/how-to-choose-an-aes-encryption-mode-cbc-ecb-ctr-ocb-cfb
+                // for a decision to use CTR
+                //
+                // NOTE: If you create the AES key with a different mode than what you use here
+                // (eg. make an aes-cfb key and use CTR mode here),
+                // you will likely get an "Esys Finish ErrorCode 0x000003c9."
+                SymmetricMode::Ctr,
+                &data_maxbuffer,
+                &iv,
+            )?
+            .0
+            .value()
+            .to_vec(),
         // The output IV that encrypt_decrypt_2 is completely wrong.
         // So we return the original randomly-generated IV.
-        iv,
-    ))
+        initialisation_vector: <[u8; 16]>::try_from(iv.value())?,
+    })
 }
 
 // Given an IV, takes a u8 vec of encrypted data
@@ -58,18 +72,23 @@ pub fn aes_encrypt(
 pub fn aes_decrypt(
     ctx: &mut Context,
     aes_key: KeyHandle,
-    iv: &InitialValue,
-    encrypted_data: Vec<u8>,
-) -> Result<(MaxBuffer, InitialValue), Box<dyn std::error::Error>> {
-    let data_maxbuffer = MaxBuffer::try_from(encrypted_data)?;
+    encryption_data: &AESEncryptionData,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // We don't want the caller to lose ownership of AESEncryption,
+    // so we use a referenc ehere.
+    let data_maxbuffer = MaxBuffer::try_from(encryption_data.encrypted_bytes.clone())?;
 
-    Ok(ctx.encrypt_decrypt_2(
-        aes_key,
-        true, // true if decrypting, false if encrypting
-        SymmetricMode::Ctr,
-        &data_maxbuffer,
-        iv,
-    )?)
+    Ok(ctx
+        .encrypt_decrypt_2(
+            aes_key,
+            true, // true if decrypting, false if encrypting
+            SymmetricMode::Ctr,
+            &data_maxbuffer,
+            &InitialValue::try_from(encryption_data.initialisation_vector.to_vec())?,
+        )?
+        .0
+        .value()
+        .to_vec())
 }
 
 // This is to help with the create_write_key function
@@ -309,7 +328,7 @@ mod tpm_tests {
             })
             .expect("Failed to HMAC the read key");
 
-        let (encrypted_data, iv) = ctx
+        let aes_encryption_data = ctx
             .execute_with_nullauth_session(|ctx| {
                 crate::tpm::aes_encrypt(ctx, aes_key, vec![1, 2, 3, 4, 5, 6, 7])
             })
@@ -317,11 +336,11 @@ mod tpm_tests {
 
         let decrypted_data = ctx
             .execute_with_nullauth_session(|ctx| {
-                crate::tpm::aes_decrypt(ctx, aes_key, &iv, encrypted_data.value().to_vec())
+                crate::tpm::aes_decrypt(ctx, aes_key, &aes_encryption_data)
             })
             .expect("failed to AES decrypt a sequence");
 
-        assert_eq!(decrypted_data.0.value(), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(decrypted_data, vec![1, 2, 3, 4, 5, 6, 7]);
 
         // Check if the written and the read HMACs are the same
         assert_eq!(hmac_written, hmac_read);

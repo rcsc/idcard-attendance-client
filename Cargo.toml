@@ -8,4 +8,6 @@ edition = "2018"
 [dependencies]
 tss-esapi = "6.1"
 bincode = "1"
-rand = "0.8"
+rand_chacha = "0.3"
+rand= { version = "0.8", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }

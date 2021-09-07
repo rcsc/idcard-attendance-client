@@ -81,6 +81,8 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "rand",
+ "rand_chacha",
+ "serde",
  "tss-esapi",
 ]
 
