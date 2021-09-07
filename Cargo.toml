@@ -8,3 +8,4 @@ edition = "2018"
 [dependencies]
 tss-esapi = "6.1"
 bincode = "1"
+rand = "0.8"

@@ -1,19 +1,82 @@
+use rand::prelude::*;
 use std::{convert::TryFrom, fs::File, path::PathBuf};
 use tss_esapi::{
     abstraction::cipher::Cipher,
     attributes::ObjectAttributesBuilder,
-    constants::tss::{TPM2_ALG_KEYEDHASH, TPM2_ALG_RSA, TPM2_ALG_SHA256},
+    constants::tss::{TPM2_ALG_KEYEDHASH, TPM2_ALG_RSA, TPM2_ALG_SHA256, TPM2_ALG_SYMCIPHER},
     handles::KeyHandle,
-    interface_types::resource_handles::Hierarchy,
-    structures::{KeyedHashParameters, KeyedHashScheme, SymmetricDefinitionObject},
+    interface_types::{algorithm::SymmetricMode, resource_handles::Hierarchy},
+    structures::{
+        InitialValue, KeyedHashParameters, KeyedHashScheme, MaxBuffer, SymmetricDefinitionObject,
+    },
     utils::{PublicParmsUnion, Tpm2BPublicBuilder, TpmsContext, TpmsRsaParmsBuilder},
     Context,
 };
+
+// Generates an IV, takes a u8 vec and encrypts it with
+// the provided key.
+pub fn aes_encrypt(
+    ctx: &mut Context,
+    aes_key: KeyHandle,
+    data: Vec<u8>,
+) -> Result<(MaxBuffer, InitialValue), Box<dyn std::error::Error>> {
+    let data_maxbuffer = MaxBuffer::try_from(data)?;
+
+    // Randomly generate an IV --- 128 bit (16 byte) array
+    let iv: [u8; 16] = rand::random();
+    // InitialValue wants a Vec when we try to call encrypt_decrypt_2, so we have to convert
+    // rand's output to a Vec.
+    let iv = Vec::from(iv);
+
+    // Keep this so we can return it later.
+    let iv = InitialValue::try_from(iv).unwrap();
+
+    Ok((
+        ctx.encrypt_decrypt_2(
+            aes_key,
+            false, // this parameter is true when we want to decrypt and false when we want to encrypt
+            // https://stackoverflow.com/questions/1220751/how-to-choose-an-aes-encryption-mode-cbc-ecb-ctr-ocb-cfb
+            // for a decision to use CTR
+            //
+            // NOTE: If you create the AES key with a different mode than what you use here
+            // (eg. make an aes-cfb key and use CTR mode here),
+            // you will likely get an "Esys Finish ErrorCode 0x000003c9."
+            SymmetricMode::Ctr,
+            &data_maxbuffer,
+            &iv,
+        )?
+        .0,
+        // The output IV that encrypt_decrypt_2 is completely wrong.
+        // So we return the original randomly-generated IV.
+        iv,
+    ))
+}
+
+// Given an IV, takes a u8 vec of encrypted data
+// and decrypts it with the provided initialisation vector
+// and provided key.
+pub fn aes_decrypt(
+    ctx: &mut Context,
+    aes_key: KeyHandle,
+    iv: &InitialValue,
+    encrypted_data: Vec<u8>,
+) -> Result<(MaxBuffer, InitialValue), Box<dyn std::error::Error>> {
+    let data_maxbuffer = MaxBuffer::try_from(encrypted_data)?;
+
+    Ok(ctx.encrypt_decrypt_2(
+        aes_key,
+        true, // true if decrypting, false if encrypting
+        SymmetricMode::Ctr,
+        &data_maxbuffer,
+        iv,
+    )?)
+}
 
 // This is to help with the create_write_key function
 pub enum KeyType {
     Primary,
     HMAC { parent_key: KeyHandle }, // This KeyHandle is for the PRIMARY/parent KEY.
+    AES { parent_key: KeyHandle },
 }
 
 // Load a key from a context file written by create_write_key to a KeyHandle struct
@@ -48,13 +111,12 @@ pub fn create_write_key(
 
     // I found some documentation on the specific key attributes at
     // https://dev.to/nandhithakamal/tpm-part-1-4emf (I'll comment the specifics
-    // on each line)
+    // on each line). It looks like this documentaiton might be totally wrong though
     //
     // I believe key attributes have to do with portability and how the key
     // should be treated in the TPM. Not all of this is perfectly clear to me at the moment,
     // and the article I linked above doesn't cover everything.
     let mut key_attributes = ObjectAttributesBuilder::new()
-        .with_sensitive_data_origin(true)
         // Tells us that the TPM made this key.
         // I don't really understand from what I linked above.
         // Keeping it though since I believe it's a default in tpm2_createprimary. (??)
@@ -62,55 +124,82 @@ pub fn create_write_key(
 
     // Apparently this can ONLY be anbled for HMAC otherwise
     // primary key creation will fail.
-    if let KeyType::HMAC { .. } = key_type {
-        key_attributes = key_attributes.with_sign_encrypt(true)
-    } else {
-        // Apparently enabling some of these attributes makes the HMAC hashing broken
-        key_attributes = key_attributes
-            // This is probably pointless since we're not going to be signing any keys anyway,
-            // but I'm keeping it since it's a default within tpm2_createprimary
-            .with_restricted(true)
-            .with_fixed_parent(true) // tpm2-tools's tpm2_createprimary does this, so why not
-            .with_fixed_tpm(true) // According to the web page I found, this probably means that
-            // Allows this key to be a parent key (for the HMAC key)
-            .with_decrypt(true);
+    match key_type {
+        KeyType::HMAC { .. } => {
+            key_attributes = key_attributes
+                .with_sensitive_data_origin(true)
+                .with_sign_encrypt(true)
+        }
+        KeyType::AES { .. } => {
+            key_attributes = key_attributes
+                .with_sensitive_data_origin(true)
+                .with_sign_encrypt(true)
+                .with_decrypt(true);
+        }
+        KeyType::Primary => {
+            // Apparently enabling some of these attributes makes the HMAC hashing broken
+            key_attributes = key_attributes
+                // This is probably pointless since we're not going to be signing any keys anyway,
+                // but I'm keeping it since it's a default within tpm2_createprimary
+                .with_sensitive_data_origin(true)
+                .with_restricted(true)
+                .with_fixed_parent(true) // tpm2-tools's tpm2_createprimary does this, so why not
+                .with_fixed_tpm(true) // According to the web page I found, this probably means that
+                // Allows this key to be a parent key (for the HMAC key)
+                .with_decrypt(true)
+                .with_sign_encrypt(false)
+                .with_user_with_auth(true);
+        }
     }
     let key_attributes = key_attributes.build()?;
 
     // We use RSA for the primary key, since examples and such, although
     // ECC would probably work as well.
     let public_key = Tpm2BPublicBuilder::new()
-        .with_type(if let KeyType::Primary = key_type {
-            // We do an RSA key if this is a primary key
-            TPM2_ALG_RSA
-        } else {
-            // We do a KEYEDHASH type of key for HMAC keys.
-            //
-            // See https://docs.rs/tss-esapi/6.1.0/tss_esapi/struct.Context.html#method.hmac
-            // for original inspiration
-            TPM2_ALG_KEYEDHASH
+        .with_type(match key_type {
+            KeyType::Primary => {
+                // We do an RSA key if this is a primary key
+                TPM2_ALG_RSA
+            }
+            KeyType::HMAC { .. } => {
+                // We do a KEYEDHASH type of key for HMAC keys.
+                //
+                // See https://docs.rs/tss-esapi/6.1.0/tss_esapi/struct.Context.html#method.hmac
+                // for original inspiration
+                TPM2_ALG_KEYEDHASH
+            }
+            KeyType::AES { .. } => TPM2_ALG_SYMCIPHER,
         })
         .with_name_alg(TPM2_ALG_SHA256)
-        .with_parms(if let KeyType::Primary = key_type {
-            PublicParmsUnion::RsaDetail(
-                // TpmsRsaParmsBuilder seems to be undocumented, so I had to use
-                // https://github.com/parallaxsecond/rust-tss-esapi/blob/main/tss-esapi/src/utils/mod.rs
-                //
-                // We could actually just use tss_esapi::utils::create_restricted_decryption_rsa_public, butS
-                // whatever. I don't get to set key attributes with that.
-                TpmsRsaParmsBuilder::new_restricted_decryption_key(
-                    // Again, this is what tpm2_createprimary does.
-                    SymmetricDefinitionObject::try_from(Cipher::aes_128_cfb())?.into(),
-                    2048, // We attempt to replicate tpm2_createprimary whenever we can
-                    0,    // Setting this to zero generates the "default" RSA exponent 2^16 + 1.
+        .with_parms(match key_type {
+            KeyType::Primary => {
+                PublicParmsUnion::RsaDetail(
+                    // TpmsRsaParmsBuilder seems to be undocumented, so I had to use
+                    // https://github.com/parallaxsecond/rust-tss-esapi/blob/main/tss-esapi/src/utils/mod.rs
+                    //
+                    // We could actually just use tss_esapi::utils::create_restricted_decryption_rsa_public, butS
+                    // whatever. I don't get to set key attributes with that.
+                    TpmsRsaParmsBuilder::new_restricted_decryption_key(
+                        // Again, this is what tpm2_createprimary does.
+                        SymmetricDefinitionObject::try_from(Cipher::aes_128_cfb())?.into(),
+                        2048, // We attempt to replicate tpm2_createprimary whenever we can
+                        0,    // Setting this to zero generates the "default" RSA exponent 2^16 + 1.
+                    )
+                    .build()?,
                 )
-                .build()?,
-            )
-        } else {
-            // This is what the example uses, but this is an HMAC with sha256
-            PublicParmsUnion::KeyedHashDetail(KeyedHashParameters::new(
-                KeyedHashScheme::HMAC_SHA_256,
-            ))
+            }
+            KeyType::HMAC { .. } => {
+                // This is what the example uses, but this is an HMAC with sha256
+                PublicParmsUnion::KeyedHashDetail(KeyedHashParameters::new(
+                    KeyedHashScheme::HMAC_SHA_256,
+                ))
+            }
+            // I got this information from the test/example here:
+            // https://github.com/parallaxsecond/rust-tss-esapi/blob/main/tss-esapi/tests/context_tests/tpm_commands/symmetric_primitives_tests.rs#L66
+            KeyType::AES { .. } => {
+                // Create aes128ctr key, so we can do the CTR variant of AES encryption
+                PublicParmsUnion::SymDetail(Cipher::aes(SymmetricMode::Ctr, 128)?)
+            }
         })
         .with_object_attributes(key_attributes)
         .build()?;
@@ -124,9 +213,10 @@ pub fn create_write_key(
                 ctx.create_primary(Hierarchy::Owner, &public_key, None, None, None, None)?
                     .key_handle
             }
-            KeyType::HMAC { parent_key } => {
+            KeyType::HMAC { parent_key } | KeyType::AES { parent_key } => {
                 println!("Parent key is {:#?}", parent_key);
                 // Create the HMAC key based off of the parent key.
+
                 let created_hmac_key = ctx
                     .create(parent_key, &public_key, None, None, None, None)
                     .expect("fail");
@@ -167,7 +257,7 @@ mod tpm_tests {
         let mut ctx =
             Context::new_with_tabrmd(TabrmdConfig::default()).expect("Failed to open TPM!");
 
-        // Test writing two keys
+        // Test writing three keys
         let primary_key = crate::tpm::create_write_key(
             &mut ctx,
             PathBuf::from("test_primary.key"),
@@ -179,6 +269,14 @@ mod tpm_tests {
             &mut ctx,
             PathBuf::from("test_hmac.key"),
             crate::tpm::KeyType::HMAC {
+                parent_key: primary_key,
+            },
+        )
+        .expect("Failed to create an hmac key!");
+        let aes_key = crate::tpm::create_write_key(
+            &mut ctx,
+            PathBuf::from("test_aes.key"),
+            crate::tpm::KeyType::AES {
                 parent_key: primary_key,
             },
         )
@@ -196,27 +294,44 @@ mod tpm_tests {
 
         // Try running an hmac on the two keys. If they have the same output,
         // then the two keys are the same.
-        let hmac_data = MaxBuffer::try_from("There is no spoon".as_bytes().to_vec())
+        let test_data = MaxBuffer::try_from("test data to hmac".as_bytes().to_vec())
             .expect("Failed to convert the data for HMAC-ing");
 
         let hmac_written = ctx
             .execute_with_nullauth_session(|ctx| {
-                ctx.hmac(hmac_key.into(), &hmac_data, HashingAlgorithm::Sha256)
+                ctx.hmac(hmac_key.into(), &test_data, HashingAlgorithm::Sha256)
             })
             .expect("Failed to HMAC the written key");
 
         let hmac_read = ctx
             .execute_with_nullauth_session(|ctx| {
-                ctx.hmac(read_hmac_key.into(), &hmac_data, HashingAlgorithm::Sha256)
+                ctx.hmac(read_hmac_key.into(), &test_data, HashingAlgorithm::Sha256)
             })
             .expect("Failed to HMAC the read key");
 
+        let (encrypted_data, iv) = ctx
+            .execute_with_nullauth_session(|ctx| {
+                crate::tpm::aes_encrypt(ctx, aes_key, vec![1, 2, 3, 4, 5, 6, 7])
+            })
+            .expect("failed to AES encrypt a sequence");
+
+        let decrypted_data = ctx
+            .execute_with_nullauth_session(|ctx| {
+                crate::tpm::aes_decrypt(ctx, aes_key, &iv, encrypted_data.value().to_vec())
+            })
+            .expect("failed to AES decrypt a sequence");
+
+        assert_eq!(decrypted_data.0.value(), vec![1, 2, 3, 4, 5, 6, 7]);
+
         // Check if the written and the read HMACs are the same
         assert_eq!(hmac_written, hmac_read);
+
+        // Try to AES encrypt, and then decrypt
 
         // Clean up
         std::fs::remove_file("test_primary.key")
             .expect("Failed to remove primary key from filesystem");
         std::fs::remove_file("test_hmac.key").expect("Failed to remove HMAC key from filesystem");
+        std::fs::remove_file("test_aes.key").expect("Failed to remove AES key from filesystem");
     }
 }
