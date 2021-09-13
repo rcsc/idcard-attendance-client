@@ -10,8 +10,12 @@ use tss_esapi::{
     abstraction::cipher::Cipher,
     attributes::ObjectAttributesBuilder,
     constants::tss::{TPM2_ALG_KEYEDHASH, TPM2_ALG_RSA, TPM2_ALG_SHA256, TPM2_ALG_SYMCIPHER},
-    handles::KeyHandle,
-    interface_types::{algorithm::SymmetricMode, resource_handles::Hierarchy},
+    handles::{KeyHandle, ObjectHandle, PersistentTpmHandle},
+    interface_types::{
+        algorithm::SymmetricMode,
+        dynamic_handles::Persistent,
+        resource_handles::{Hierarchy, Provision},
+    },
     structures::{
         InitialValue, KeyedHashParameters, KeyedHashScheme, MaxBuffer, SymmetricDefinitionObject,
     },
@@ -98,6 +102,11 @@ pub enum KeyType {
     AES { parent_key: KeyHandle },
 }
 
+pub enum PersistType {
+    Persist(u32), // 4 byte array for a u32 memory address, or something like that.
+    Temporary,
+}
+
 // Load a key from a context file written by create_write_key to a KeyHandle struct
 pub fn load_key_from_file(
     ctx: &mut Context,
@@ -125,7 +134,10 @@ pub fn create_write_key(
     ctx: &mut Context,
     output_context: PathBuf,
     key_type: KeyType,
-) -> Result<KeyHandle, Box<dyn std::error::Error>> {
+    // Should we persist the key between reboots? Also, this is an enum for readability when invoking this function.
+    persist: PersistType,
+    // We use an ObjectHandle since if you persist, the KeyHandle ends up getting turned into an ObjectHandle
+) -> Result<ObjectHandle, Box<dyn std::error::Error>> {
     // Inspired from https://docs.rs/tss-esapi/6.1.0/tss_esapi/struct.Context.html#method.hmac
 
     // I found some documentation on the specific key attributes at
@@ -166,8 +178,7 @@ pub fn create_write_key(
                 .with_fixed_tpm(true) // According to the web page I found, this probably means that
                 // Allows this key to be a parent key (for the HMAC key)
                 .with_decrypt(true)
-                .with_sign_encrypt(false)
-                .with_user_with_auth(true);
+                .with_sign_encrypt(false);
         }
     }
     let key_attributes = key_attributes.build()?;
@@ -250,6 +261,25 @@ pub fn create_write_key(
             }
         };
 
+        let key_handle = if let PersistType::Persist(address) = persist {
+            // Documentation found at https://github.com/parallaxsecond/rust-tss-esapi/blob/main/tss-esapi/tests/context_tests/tpm_commands/context_management_tests.rs#L225
+            // We are panicking since this stuff is not working yet.
+            let persist_tpm_handle = PersistentTpmHandle::new(address)
+                .expect("Failed to create persistent TPM handle parameters.");
+            let persist = Persistent::Persistent(persist_tpm_handle);
+
+            // TODO what if some key already exists at the given address?
+            // The example handles this but we do not. I suspect we should error
+            // instead of removing the handle, like the example does.
+            //
+            // It's worth mentioning that the owner provision is what
+            // tpm2_evictcontrol uses by default
+            ctx.evict_control(Provision::Owner, key_handle.into(), persist)
+                .expect("Failed to persist TPM key!")
+        } else {
+            key_handle.into()
+        };
+
         let key_serializable = ctx.context_save(key_handle.into())?;
 
         // To annoy people more (even though
@@ -281,6 +311,7 @@ mod tpm_tests {
             &mut ctx,
             PathBuf::from("test_primary.key"),
             crate::tpm::KeyType::Primary,
+            crate::tpm::PersistType::Temporary,
         )
         .expect("Failed to create a primary key!");
 
@@ -288,16 +319,18 @@ mod tpm_tests {
             &mut ctx,
             PathBuf::from("test_hmac.key"),
             crate::tpm::KeyType::HMAC {
-                parent_key: primary_key,
+                parent_key: primary_key.into(),
             },
+            crate::tpm::PersistType::Persist(0x81020001),
         )
         .expect("Failed to create an hmac key!");
         let aes_key = crate::tpm::create_write_key(
             &mut ctx,
             PathBuf::from("test_aes.key"),
             crate::tpm::KeyType::AES {
-                parent_key: primary_key,
+                parent_key: primary_key.into(),
             },
+            crate::tpm::PersistType::Persist(0x81000020),
         )
         .expect("Failed to create an hmac key!");
 
@@ -330,13 +363,13 @@ mod tpm_tests {
 
         let aes_encryption_data = ctx
             .execute_with_nullauth_session(|ctx| {
-                crate::tpm::aes_encrypt(ctx, aes_key, vec![1, 2, 3, 4, 5, 6, 7])
+                crate::tpm::aes_encrypt(ctx, aes_key.into(), vec![1, 2, 3, 4, 5, 6, 7])
             })
             .expect("failed to AES encrypt a sequence");
 
         let decrypted_data = ctx
             .execute_with_nullauth_session(|ctx| {
-                crate::tpm::aes_decrypt(ctx, aes_key, &aes_encryption_data)
+                crate::tpm::aes_decrypt(ctx, aes_key.into(), &aes_encryption_data)
             })
             .expect("failed to AES decrypt a sequence");
 
@@ -344,8 +377,6 @@ mod tpm_tests {
 
         // Check if the written and the read HMACs are the same
         assert_eq!(hmac_written, hmac_read);
-
-        // Try to AES encrypt, and then decrypt
 
         // Clean up
         std::fs::remove_file("test_primary.key")
