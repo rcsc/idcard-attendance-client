@@ -12,6 +12,7 @@ fn main() {
         PathBuf::from("test_primary.key"),
         crate::tpm::KeyType::Primary,
         tpm::PersistType::Persist(u32::from_be_bytes([0x81, 0x00, 0x00, 0x20])),
+        tpm::KeyAuthType::Password("test-password".to_string()),
     )
     .expect("Failed to create a primary key!");
     // let _read_primary_key =
