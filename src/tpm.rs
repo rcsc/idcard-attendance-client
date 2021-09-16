@@ -4,17 +4,19 @@ use serde::{Deserialize, Serialize};
 use std::{
     convert::{TryFrom, TryInto},
     fs::File,
+    io::{Seek, SeekFrom},
     path::PathBuf,
 };
 use tss_esapi::{
     abstraction::cipher::Cipher,
     attributes::ObjectAttributesBuilder,
     constants::tss::{TPM2_ALG_KEYEDHASH, TPM2_ALG_RSA, TPM2_ALG_SHA256, TPM2_ALG_SYMCIPHER},
-    handles::{KeyHandle, ObjectHandle, PersistentTpmHandle},
+    handles::{KeyHandle, ObjectHandle, PersistentTpmHandle, TpmHandle},
     interface_types::{
         algorithm::SymmetricMode,
         dynamic_handles::Persistent,
         resource_handles::{Hierarchy, Provision},
+        session_handles::AuthSession,
     },
     structures::{
         Auth, InitialValue, KeyedHashParameters, KeyedHashScheme, MaxBuffer,
@@ -117,14 +119,33 @@ pub fn load_key_from_file(
     ctx: &mut Context,
     path: PathBuf,
 ) -> Result<KeyHandle, Box<dyn std::error::Error>> {
-    let key_context: TpmsContext = bincode::deserialize_from(File::open(path)?)?;
+    let mut opened_file = File::open(path)?;
+    let key_context_result: bincode::Result<TpmsContext> = bincode::deserialize_from(&opened_file);
 
-    // We would use map and just return right here, but it seems like the map
-    // function on Result doesn't cause the error to be wrapped into a box.
-    //
-    // Mapping the error would just use more lines of code...
-    let loaded_key = ctx.context_load(key_context)?;
-    Ok(loaded_key.into())
+    // Check if the Result is an error.
+    // If it is, then we're going to go ahead an asume this is a u32 that we'll be using
+    // to retreive a persisted key.
+    if let Err(e) = key_context_result {
+        // The file pointer gets advanced, so we have to move it back to the beginning,
+        // or it won't read our u32.
+
+        opened_file.seek(SeekFrom::Start(0))?;
+        let persist_address: u32 = bincode::deserialize_from(&opened_file)?;
+
+        let persist_tpm_handle = PersistentTpmHandle::new(persist_address)?;
+
+        ctx.execute_without_session(|ctx| {
+            Ok(ctx
+                .tr_from_tpm_public(TpmHandle::Persistent(persist_tpm_handle))?
+                .into())
+        })
+    } else if let Ok(key_context) = key_context_result {
+        let loaded_key = ctx.context_load(key_context)?;
+        Ok(loaded_key.into())
+    } else {
+        // This should never happen
+        panic!()
+    }
 }
 
 // Create a key and store it on the TPM (primary key or HMAC key, doesn't matter).
@@ -240,7 +261,7 @@ pub fn create_write_key(
         .with_object_attributes(key_attributes)
         .build()?;
 
-    ctx.execute_with_nullauth_session(|ctx| {
+    ctx.execute_with_sessions((Some(AuthSession::Password), None, None), |ctx| {
         // Use authentication if we enabled it
         let auth = if let KeyAuthType::Password(password) = authentication {
             Some(Auth::try_from(password.into_bytes())?)
@@ -253,6 +274,7 @@ pub fn create_write_key(
                 // Endorsement hierarchy is for verification and attestation or something,
                 // which is kinda what we're doing here, so we might as well use the
                 // endorsement hierarchy.
+
                 ctx.create_primary(
                     Hierarchy::Owner,
                     &public_key,
@@ -260,7 +282,8 @@ pub fn create_write_key(
                     None,
                     None,
                     None,
-                )?
+                )
+                .expect("TPM CREATE PRIMARY")
                 .key_handle
             }
             KeyType::HMAC { parent_key } | KeyType::AES { parent_key } => {
@@ -281,7 +304,8 @@ pub fn create_write_key(
             }
         };
 
-        let key_handle = if let PersistType::Persist(address) = persist {
+        let write_key = File::create(output_context)?;
+        Ok(if let PersistType::Persist(address) = persist {
             // Documentation found at https://github.com/parallaxsecond/rust-tss-esapi/blob/main/tss-esapi/tests/context_tests/tpm_commands/context_management_tests.rs#L225
             // We are panicking since this stuff is not working yet.
             let persist_tpm_handle = PersistentTpmHandle::new(address)
@@ -294,20 +318,20 @@ pub fn create_write_key(
             //
             // It's worth mentioning that the owner provision is what
             // tpm2_evictcontrol uses by default
-            ctx.evict_control(Provision::Owner, key_handle.into(), persist)
-                .expect("Failed to persist TPM key!")
+            let handle = ctx
+                .evict_control(Provision::Owner, key_handle.into(), persist)
+                .expect("Failed to persist TPM key!");
+
+            bincode::serialize_into(write_key, &(address as u32))?;
+            handle
         } else {
+            let key_serializable = ctx.context_save(key_handle.into())?;
+
+            // To annoy people more (even though
+            // it really won't matter), why not just serialize the context to a binary format?
+            bincode::serialize_into(write_key, &key_serializable)?;
             key_handle.into()
-        };
-
-        let key_serializable = ctx.context_save(key_handle.into())?;
-
-        // To annoy people more (even though
-        // it really won't matter), why not just serialize the context to a binary format?
-        let write_key = File::create(output_context)?;
-        bincode::serialize_into(write_key, &key_serializable)?;
-
-        Ok(key_handle)
+        })
     })
 }
 
