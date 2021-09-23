@@ -10,7 +10,13 @@ use std::{
 use tss_esapi::{
     abstraction::cipher::Cipher,
     attributes::ObjectAttributesBuilder,
-    constants::tss::{TPM2_ALG_KEYEDHASH, TPM2_ALG_RSA, TPM2_ALG_SHA256, TPM2_ALG_SYMCIPHER},
+    constants::{
+        tss::{
+            TPM2_ALG_KEYEDHASH, TPM2_ALG_RSA, TPM2_ALG_SHA256, TPM2_ALG_SYMCIPHER,
+            TPM2_PERSISTENT_FIRST,
+        },
+        CapabilityType,
+    },
     handles::{KeyHandle, ObjectHandle, PersistentTpmHandle, TpmHandle},
     interface_types::{
         algorithm::SymmetricMode,
@@ -30,6 +36,40 @@ use tss_esapi::{
 pub struct AESEncryptionData {
     initialisation_vector: [u8; 16],
     encrypted_bytes: Vec<u8>,
+}
+
+// Wrap over the boilerplate to call evict_control on a key with a specified address
+pub fn evict_key(
+    ctx: &mut Context,
+    // None means Evict without a handle
+    handle: ObjectHandle,
+    address: u32,
+) -> std::result::Result<tss_esapi::handles::ObjectHandle, tss_esapi::Error> {
+    // Boilerplate to convert the u32 address into something that tss-esapi understands.
+    let persist_tpm_handle = PersistentTpmHandle::new(address)
+        .expect("Failed to create persistent TPM handle parameters.");
+    let persist = Persistent::Persistent(persist_tpm_handle);
+
+    // If the ObjectHandle is None, then we are trying to evict an address without a handle.
+    let handle = if let ObjectHandle::None = handle {
+        ctx.tr_from_tpm_public(TpmHandle::Persistent(persist_tpm_handle))
+            .expect("Failed to get persisted key from address")
+        // NOTE this always fails. I don't really care since the application is never going to be evicting keys until later.
+        // The way to evict keys is complicated and the example doesn't work quite right for me, so I have to experiment more.
+        // Example: https://github.com/parallaxsecond/rust-tss-esapi/blob/main/tss-esapi/tests/context_tests/tpm_commands/context_management_tests.rs
+    } else {
+        handle
+    };
+
+    // TODO what if some key already exists at the given address?
+    // The example handles this but we do not. I suspect we should error
+    // instead of removing the handle, like the example does.
+    //
+    // It's worth mentioning that the owner provision is what
+    // tpm2_evictcontrol uses by default. But what *is* the
+    // meaning of each of the provisions?
+
+    ctx.evict_control(Provision::Owner, handle, persist)
 }
 
 // Generates an IV, takes a u8 vec and encrypts it with
@@ -114,6 +154,19 @@ pub enum KeyAuthType {
     Password(String),
     NoAuth,
 }
+
+#[derive(Serialize, Deserialize)]
+pub enum SerializableKeyType {
+    Persistent(u32),
+    Temporary(TpmsContext),
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SerializableKey {
+    key_type: SerializableKeyType,
+    auth: bool, // true -> uses auth, false -> doesn't use auth.
+}
+
 // Load a key from a context file written by create_write_key to a KeyHandle struct
 pub fn load_key_from_file(
     ctx: &mut Context,
@@ -290,6 +343,10 @@ pub fn create_write_key(
                 println!("Parent key is {:#?}", parent_key);
                 // Create the HMAC key based off of the parent key.
 
+                // The key will fail to create if we don't authenticate the parent key first,
+                // but we aren't going to do the authentication here for that, since that should
+                // be done before the user calls this function.
+
                 let created_hmac_key = ctx
                     .create(parent_key, &public_key, auth.as_ref(), None, None, None)
                     .expect("fail");
@@ -312,15 +369,7 @@ pub fn create_write_key(
                 .expect("Failed to create persistent TPM handle parameters.");
             let persist = Persistent::Persistent(persist_tpm_handle);
 
-            // TODO what if some key already exists at the given address?
-            // The example handles this but we do not. I suspect we should error
-            // instead of removing the handle, like the example does.
-            //
-            // It's worth mentioning that the owner provision is what
-            // tpm2_evictcontrol uses by default
-            let handle = ctx
-                .evict_control(Provision::Owner, key_handle.into(), persist)
-                .expect("Failed to persist TPM key!");
+            let handle = evict_key(ctx, key_handle.into(), address)?;
 
             bincode::serialize_into(write_key, &(address as u32))?;
             handle
@@ -339,9 +388,12 @@ pub fn create_write_key(
 mod tpm_tests {
     use std::convert::TryFrom;
     use std::path::PathBuf;
+    use tss_esapi::structures::Auth;
     use tss_esapi::{
-        interface_types::algorithm::HashingAlgorithm, structures::MaxBuffer,
-        tcti_ldr::TabrmdConfig, Context,
+        interface_types::{algorithm::HashingAlgorithm, session_handles::AuthSession},
+        structures::MaxBuffer,
+        tcti_ldr::TabrmdConfig,
+        Context,
     };
 
     #[test]
@@ -355,47 +407,64 @@ mod tpm_tests {
             &mut ctx,
             PathBuf::from("test_primary.key"),
             crate::tpm::KeyType::Primary,
-            crate::tpm::PersistType::Temporary,
+            crate::tpm::PersistType::Persist(0x81050001),
+            crate::tpm::KeyAuthType::Password("test-password".to_string()),
         )
         .expect("Failed to create a primary key!");
+
+        // TODO actually test using the primary key to encrypt and decrypt data
+        let read_primary_key =
+            crate::tpm::load_key_from_file(&mut ctx, PathBuf::from("test_primary.key"))
+                .expect("Failed to read primary key.");
+
+        ctx.tr_set_auth(
+            read_primary_key.into(),
+            &Auth::try_from("test-password".as_bytes())
+                .expect("failed to create authentication for parent key"),
+        )
+        .expect("Failed to authenticate parent key");
 
         let hmac_key = crate::tpm::create_write_key(
             &mut ctx,
             PathBuf::from("test_hmac.key"),
             crate::tpm::KeyType::HMAC {
-                parent_key: primary_key.into(),
+                parent_key: read_primary_key.into(),
             },
-            crate::tpm::PersistType::Persist(0x81020001),
+            crate::tpm::PersistType::Persist(0x81060001),
+            crate::tpm::KeyAuthType::Password("test-password-1".to_string()),
         )
         .expect("Failed to create an hmac key!");
+
         let aes_key = crate::tpm::create_write_key(
             &mut ctx,
             PathBuf::from("test_aes.key"),
             crate::tpm::KeyType::AES {
-                parent_key: primary_key.into(),
+                parent_key: read_primary_key.into(),
             },
-            crate::tpm::PersistType::Persist(0x81000020),
+            crate::tpm::PersistType::Persist(0x81070001),
+            crate::tpm::KeyAuthType::Password("test-password-2".to_string()),
         )
         .expect("Failed to create an hmac key!");
 
-        // Test reading two keys
-
-        // TODO actually test using the primary key to encrypt and decrypt data
-        let _read_primary_key =
-            crate::tpm::load_key_from_file(&mut ctx, PathBuf::from("test_primary.key"))
-                .expect("Failed to read back primary key!");
+        // Try running an hmac on the two keys. If they have the same output,
+        // then the two keys are the same.
         let read_hmac_key =
             crate::tpm::load_key_from_file(&mut ctx, PathBuf::from("test_hmac.key"))
                 .expect("Failed to read back hmac key!");
 
-        // Try running an hmac on the two keys. If they have the same output,
-        // then the two keys are the same.
+        ctx.tr_set_auth(
+            read_hmac_key.into(),
+            &Auth::try_from("test-password-1".as_bytes())
+                .expect("failed to create authentication for hmac key"),
+        )
+        .expect("Failed to authenticate parent key");
+
         let test_data = MaxBuffer::try_from("test data to hmac".as_bytes().to_vec())
             .expect("Failed to convert the data for HMAC-ing");
 
         let hmac_written = ctx
             .execute_with_nullauth_session(|ctx| {
-                ctx.hmac(hmac_key.into(), &test_data, HashingAlgorithm::Sha256)
+                ctx.hmac(read_hmac_key.into(), &test_data, HashingAlgorithm::Sha256)
             })
             .expect("Failed to HMAC the written key");
 
@@ -405,15 +474,27 @@ mod tpm_tests {
             })
             .expect("Failed to HMAC the read key");
 
+        // Test the AES keys
+
+        let read_aes_key = crate::tpm::load_key_from_file(&mut ctx, PathBuf::from("test_aes.key"))
+            .expect("Failed to read back hmac key!");
+
+        ctx.tr_set_auth(
+            read_aes_key.into(),
+            &Auth::try_from("test-password-2".as_bytes())
+                .expect("failed to create authentication for hmac key"),
+        )
+        .expect("Failed to authenticate parent key");
+
         let aes_encryption_data = ctx
             .execute_with_nullauth_session(|ctx| {
-                crate::tpm::aes_encrypt(ctx, aes_key.into(), vec![1, 2, 3, 4, 5, 6, 7])
+                crate::tpm::aes_encrypt(ctx, read_aes_key.into(), vec![1, 2, 3, 4, 5, 6, 7])
             })
             .expect("failed to AES encrypt a sequence");
 
         let decrypted_data = ctx
             .execute_with_nullauth_session(|ctx| {
-                crate::tpm::aes_decrypt(ctx, aes_key.into(), &aes_encryption_data)
+                crate::tpm::aes_decrypt(ctx, read_aes_key.into(), &aes_encryption_data)
             })
             .expect("failed to AES decrypt a sequence");
 
@@ -421,6 +502,16 @@ mod tpm_tests {
 
         // Check if the written and the read HMACs are the same
         assert_eq!(hmac_written, hmac_read);
+
+        ctx.execute_with_sessions((Some(AuthSession::Password), None, None), |ctx| {
+            // Evict the keys
+            crate::tpm::evict_key(ctx, primary_key.into(), 0x81050001)
+                .expect("failed to evict the primary key!");
+            crate::tpm::evict_key(ctx, hmac_key.into(), 0x81060001)
+                .expect("failed to evict the HMAC key!");
+            crate::tpm::evict_key(ctx, aes_key.into(), 0x81070001)
+                .expect("failed to evict the AES key!");
+        });
 
         // Clean up
         std::fs::remove_file("test_primary.key")
