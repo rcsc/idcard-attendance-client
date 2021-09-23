@@ -403,6 +403,7 @@ mod tpm_tests {
             Context::new_with_tabrmd(TabrmdConfig::default()).expect("Failed to open TPM!");
 
         // Test writing three keys
+        // TODO also make sure that non-persisted/authenticated keys work (both, not either or).
         let primary_key = crate::tpm::create_write_key(
             &mut ctx,
             PathBuf::from("test_primary.key"),
@@ -446,6 +447,8 @@ mod tpm_tests {
         )
         .expect("Failed to create an hmac key!");
 
+        // TODO try INTENTIONALLY using wrong auth values
+        //
         // Try running an hmac on the two keys. If they have the same output,
         // then the two keys are the same.
         let read_hmac_key =
