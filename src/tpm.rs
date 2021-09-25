@@ -2,7 +2,7 @@ use rand::prelude::*;
 use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::{
-    convert::{TryFrom, TryInto},
+    convert::TryFrom,
     fs::File,
     io::{Seek, SeekFrom},
     path::PathBuf,
@@ -10,13 +10,7 @@ use std::{
 use tss_esapi::{
     abstraction::cipher::Cipher,
     attributes::ObjectAttributesBuilder,
-    constants::{
-        tss::{
-            TPM2_ALG_KEYEDHASH, TPM2_ALG_RSA, TPM2_ALG_SHA256, TPM2_ALG_SYMCIPHER,
-            TPM2_PERSISTENT_FIRST,
-        },
-        CapabilityType,
-    },
+    constants::tss::{TPM2_ALG_KEYEDHASH, TPM2_ALG_RSA, TPM2_ALG_SHA256, TPM2_ALG_SYMCIPHER},
     handles::{KeyHandle, ObjectHandle, PersistentTpmHandle, TpmHandle},
     interface_types::{
         algorithm::SymmetricMode,
@@ -145,11 +139,17 @@ pub enum KeyType {
     AES { parent_key: KeyHandle },
 }
 
+// We don't test Temporary, but I don't like warnings
+// TODO test Temporary key creation
+#[allow(dead_code)]
 pub enum PersistType {
     Persist(u32), // 4 byte array for a u32 memory address, or something like that.
     Temporary,
 }
 
+// We don't test NoAuth, but I don't like warnings
+// TODO test NoAuth key creation
+#[allow(dead_code)]
 pub enum KeyAuthType {
     Password(String),
     NoAuth,
@@ -178,7 +178,7 @@ pub fn load_key_from_file(
     // Check if the Result is an error.
     // If it is, then we're going to go ahead an asume this is a u32 that we'll be using
     // to retreive a persisted key.
-    if let Err(e) = key_context_result {
+    if let Err(_) = key_context_result {
         // The file pointer gets advanced, so we have to move it back to the beginning,
         // or it won't read our u32.
 
@@ -347,9 +347,8 @@ pub fn create_write_key(
                 // but we aren't going to do the authentication here for that, since that should
                 // be done before the user calls this function.
 
-                let created_hmac_key = ctx
-                    .create(parent_key, &public_key, auth.as_ref(), None, None, None)
-                    .expect("fail");
+                let created_hmac_key =
+                    ctx.create(parent_key, &public_key, auth.as_ref(), None, None, None)?;
 
                 // To get a KeyHandle for the new key, you need to plug in the newly-
                 // created key into the parent key handle.
@@ -365,9 +364,6 @@ pub fn create_write_key(
         Ok(if let PersistType::Persist(address) = persist {
             // Documentation found at https://github.com/parallaxsecond/rust-tss-esapi/blob/main/tss-esapi/tests/context_tests/tpm_commands/context_management_tests.rs#L225
             // We are panicking since this stuff is not working yet.
-            let persist_tpm_handle = PersistentTpmHandle::new(address)
-                .expect("Failed to create persistent TPM handle parameters.");
-            let persist = Persistent::Persistent(persist_tpm_handle);
 
             let handle = evict_key(ctx, key_handle.into(), address)?;
 
