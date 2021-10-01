@@ -13,6 +13,7 @@ fn main() {
         Context::new_with_tabrmd(TabrmdConfig::default()).expect("Failed to open TPM!");
     // Set Password session
     keygen::check_create_keys(&mut context);
+    keygen::create_colour_security_values(&mut context);
 
     // context.execute_with_sessions((Some(AuthSession::Password), None, None), |context| {
     //     crate::tpm::evict_key(context, ObjectHandle::None, 0x81050001)
