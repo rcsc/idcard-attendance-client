@@ -74,7 +74,7 @@ pub fn unlock_keys_widget(
 
         // Start signing in now that the key handles are opened
         // the keys are unlocked
-        window.set_child(Some(&crate::gui::sign_in::scan()));
+        window.set_child(Some(&crate::gui::sign_in::scan(window.clone())));
     });
 
     list_box

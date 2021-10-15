@@ -7,7 +7,7 @@ mod keygen;
 mod tpm;
 
 use gtk::prelude::*;
-use gtk::{Application, ApplicationWindow, Button};
+use gtk::{Application, ApplicationWindow, Button, EventControllerKey};
 use std::cell::RefCell;
 use std::rc::Rc;
 use tss_esapi::{tcti_ldr::TabrmdConfig, Context};
