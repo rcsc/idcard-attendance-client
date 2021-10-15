@@ -20,8 +20,8 @@ fn main() {
     let key_data = Rc::new(RefCell::new(gui::KeyData::default()));
     let attendance_data = Rc::new(RefCell::new(gui::AttendanceData::default()));
     // Set Password session
-    // keygen::check_create_keys(&mut context);
-    // keygen::create_colour_security_values(&mut context);
+    // keygen::check_create_keys(&mut *context.borrow_mut());
+    // keygen::create_colour_security_values(&mut *context.borrow_mut());
 
     let app = Application::builder()
         .application_id("club.ridgecompsci.idcard-attendance-client")
