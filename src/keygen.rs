@@ -33,7 +33,7 @@ pub fn create_colour_security_values(context: &mut Context) {
 
     // Load AES key and authenticate it
     let aes_key_path = APP_DATA.data_dir().join("keys").join("aes.key");
-    let aes_key_unlocked = get_unlocked_key(
+    let aes_key_unlocked = prompt_unlocked_key(
         context,
         "Enter the password for the AES key: ".to_string(),
         aes_key_path,
@@ -81,15 +81,25 @@ pub fn create_colour_security_values(context: &mut Context) {
         );
     }
 }
-
-pub fn get_unlocked_key(
+pub fn prompt_unlocked_key(
     context: &mut Context,
     prompt: String,
     file: PathBuf,
 ) -> tss_esapi::handles::KeyHandle {
-    let primary_key_password =
-        rpassword::prompt_password_stdout(&prompt).expect("Failed to read primary key password!");
+    get_unlocked_key(
+        context,
+        rpassword::prompt_password_stdout(&prompt).expect("Failed to read primary key password!"),
+        file,
+    )
+}
 
+// TODO we want this function to also check whether the password is correct or not and return
+// a corresponding error.
+pub fn get_unlocked_key(
+    context: &mut Context,
+    primary_key_password: String,
+    file: PathBuf,
+) -> tss_esapi::handles::KeyHandle {
     let read_primary_key =
         crate::tpm::load_key_from_file(context, file).expect("Failed to read primary key.");
 
@@ -121,7 +131,7 @@ pub fn check_create_keys(
 
     // This will only work if the key is already created
     let get_unlocked_primary_key = |context: &mut Context| -> tss_esapi::handles::KeyHandle {
-        get_unlocked_key(
+        prompt_unlocked_key(
             context,
             "Enter primary key password: ".to_owned(),
             primary_key_file.clone(),

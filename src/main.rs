@@ -8,12 +8,17 @@ mod tpm;
 
 use gtk::prelude::*;
 use gtk::{Application, ApplicationWindow, Button};
+use std::cell::RefCell;
+use std::rc::Rc;
 use tss_esapi::{tcti_ldr::TabrmdConfig, Context};
 
 fn main() {
     // Test reading back stuff
-    let mut context =
-        Context::new_with_tabrmd(TabrmdConfig::default()).expect("Failed to open TPM!");
+    let mut context = Rc::new(RefCell::new(
+        Context::new_with_tabrmd(TabrmdConfig::default()).expect("Failed to open TPM!"),
+    ));
+    let key_data = Rc::new(RefCell::new(gui::KeyData::default()));
+    let attendance_data = Rc::new(RefCell::new(gui::AttendanceData::default()));
     // Set Password session
     // keygen::check_create_keys(&mut context);
     // keygen::create_colour_security_values(&mut context);
@@ -22,15 +27,17 @@ fn main() {
         .application_id("club.ridgecompsci.idcard-attendance-client")
         .build();
 
-    app.connect_activate(|app: &Application| {
+    app.connect_activate(move |app: &Application| {
         let window = ApplicationWindow::builder()
             .application(app)
             .title("Attendance")
             .build();
 
-        let button = Button::builder().label("Unlock Keys").build();
-
-        window.set_child(Some(&button));
+        window.set_child(Some(&gui::unlock_keys::unlock_keys_widget(
+            context.clone(),
+            key_data.clone(),
+            attendance_data.clone(),
+        )));
 
         window.present();
     });
