@@ -8,6 +8,6 @@ pub struct AttendanceData {}
 
 #[derive(Default, Debug)]
 pub struct KeyData {
-    aes_key_handle: Option<KeyHandle>,
-    hmac_key_handle: Option<KeyHandle>,
+    pub aes_key_handle: Option<KeyHandle>,
+    pub hmac_key_handle: Option<KeyHandle>,
 }

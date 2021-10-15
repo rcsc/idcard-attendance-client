@@ -11,11 +11,6 @@ use crate::{
     keygen::{get_unlocked_key, APP_DATA},
 };
 
-lazy_static! {
-    static ref KEY_DATA: KeyData = KeyData::default();
-    static ref ATTENDANCE_DATA: AttendanceData = AttendanceData::default();
-}
-
 pub fn unlock_keys_widget(
     context: Rc<RefCell<Context>>,
     key_data: Rc<RefCell<KeyData>>,
@@ -48,7 +43,7 @@ pub fn unlock_keys_widget(
     list_box.append(&aes_key_password);
     list_box.append(&unlock_button);
 
-    unlock_button.connect_clicked(move |_| {
+    unlock_button.connect_clicked(move |button| {
         (*key_data.borrow_mut()).aes_key_handle = Some(get_unlocked_key(
             &mut *context.borrow_mut(),
             hmac_key_password.text().to_string(),
@@ -61,6 +56,25 @@ pub fn unlock_keys_widget(
         ));
 
         println!("Unlocked the keys: {:#?}", key_data);
+
+        // Switch the child for the parent
+        // TODO handle it when get_unlocked_key fails and display a visual response
+        //
+        // ...Wow this code is janky
+        // If we try to just take the parent of list_box,
+        // then we would get ownership issues since list_box is
+        // moved into this closure when we use it.
+        let window = button
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .downcast::<gtk::ApplicationWindow>()
+            .unwrap();
+
+        // Start signing in now that the key handles are opened
+        // the keys are unlocked
+        window.set_child(Some(&crate::gui::sign_in::scan()));
     });
 
     list_box
