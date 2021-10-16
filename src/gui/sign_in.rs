@@ -1,10 +1,26 @@
+use crate::gui::ColourSecurityValue;
 use gtk::prelude::*;
-use gtk::{ApplicationWindow, Box, Dialog, DialogFlags, EventControllerKey, Label, ResponseType};
+use gtk::{
+    glib::clone, ApplicationWindow, Box, Button, Dialog, DialogFlags, EventControllerKey, Grid,
+    Label, ResponseType,
+};
+use std::rc::Rc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::gui::AttendanceData;
+
 lazy_static! {
     static ref KEY_DATA: Mutex<String> = Mutex::new(String::new());
+}
+
+pub fn show_pin_security(dialog_clone: Rc<Dialog>, colour_security: ColourSecurityValue) {
+    println!(
+        "Showing PIN security, colour_security was chosen as {:?}",
+        colour_security
+    );
+    dialog_clone.set_child(Some(&Button::with_label("Hello")));
+    dialog_clone.show();
 }
 
 pub fn scan(window: ApplicationWindow) -> Box {
@@ -30,13 +46,75 @@ pub fn scan(window: ApplicationWindow) -> Box {
         if let Some(unicode_value) = key.to_unicode() {
             if unicode_value == '\r' {
                 // Begin colour security
+                // TODO clear the KEY_DATA variable and move it to a separate string so we can pass
+                // it into show_pin_security
                 println!("Beginning colour security!");
-                let colour_security_dialog = Dialog::with_buttons::<ApplicationWindow>(
-                    Some("hello there"),
+                let colour_security_dialog = Rc::new(Dialog::with_buttons::<ApplicationWindow>(
+                    Some("Colour Security"),
                     Some(&window_clone),
-                    DialogFlags::MODAL | DialogFlags::DESTROY_WITH_PARENT,
-                    &[("cancel", ResponseType::Ok)],
-                );
+                    DialogFlags::MODAL
+                        | DialogFlags::DESTROY_WITH_PARENT
+                        | DialogFlags::USE_HEADER_BAR,
+                    &[("Cancel", ResponseType::Cancel)],
+                ));
+
+                let dialog_buttons_grid = Grid::new();
+
+                let colour_security_dialog_red = Rc::clone(&colour_security_dialog);
+                let colour_security_dialog_green = Rc::clone(&colour_security_dialog);
+                let colour_security_dialog_blue = Rc::clone(&colour_security_dialog);
+                let colour_security_dialog_orange = Rc::clone(&colour_security_dialog);
+
+                let red = Button::builder()
+                    .label("Red")
+                    .css_classes(vec!["red".to_string()])
+                    .build();
+                red.connect_clicked(move |btn| {
+                    show_pin_security(
+                        Rc::clone(&colour_security_dialog_red),
+                        ColourSecurityValue::Red,
+                    )
+                });
+
+                let green = Button::builder()
+                    .label("Green")
+                    .css_classes(vec!["green".to_string()])
+                    .build();
+                green.connect_clicked(move |btn| {
+                    show_pin_security(
+                        Rc::clone(&colour_security_dialog_green),
+                        ColourSecurityValue::Green,
+                    )
+                });
+
+                let orange = Button::builder()
+                    .label("Orange")
+                    .css_classes(vec!["orange".to_string()])
+                    .build();
+                orange.connect_clicked(move |btn| {
+                    show_pin_security(
+                        Rc::clone(&colour_security_dialog_orange),
+                        ColourSecurityValue::Orange,
+                    )
+                });
+                let blue = Button::builder()
+                    .label("Blue")
+                    .css_classes(vec!["blue".to_string()])
+                    .build();
+                blue.connect_clicked(move |btn| {
+                    show_pin_security(
+                        Rc::clone(&colour_security_dialog_blue),
+                        ColourSecurityValue::Blue,
+                    )
+                });
+
+                dialog_buttons_grid.attach(&red, 0, 0, 1, 1);
+                dialog_buttons_grid.attach(&green, 1, 0, 1, 1);
+                dialog_buttons_grid.attach(&blue, 0, 1, 1, 1);
+                dialog_buttons_grid.attach(&orange, 1, 1, 1, 1);
+
+                colour_security_dialog.set_child(Some(&dialog_buttons_grid));
+
                 colour_security_dialog.set_transient_for(Some(&window_clone));
                 colour_security_dialog.show()
             } else {

@@ -1,10 +1,14 @@
+use crate::colour_security::ColourSecurityValue;
 use tss_esapi::handles::KeyHandle;
 
 pub mod sign_in;
 pub mod unlock_keys;
 
-#[derive(Default)]
-pub struct AttendanceData {}
+pub struct AttendanceData {
+    pub barcode_value: String,
+    pub colour_security_value: ColourSecurityValue,
+    pub security_pin: String,
+}
 
 #[derive(Default, Debug)]
 pub struct KeyData {

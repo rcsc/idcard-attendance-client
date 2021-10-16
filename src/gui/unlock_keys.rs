@@ -11,11 +11,7 @@ use crate::{
     keygen::{get_unlocked_key, APP_DATA},
 };
 
-pub fn unlock_keys_widget(
-    context: Rc<RefCell<Context>>,
-    key_data: Rc<RefCell<KeyData>>,
-    attendance_data: Rc<RefCell<AttendanceData>>,
-) -> Box {
+pub fn unlock_keys_widget(context: Rc<RefCell<Context>>, key_data: Rc<RefCell<KeyData>>) -> Box {
     let list_box = Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)

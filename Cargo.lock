@@ -521,6 +521,8 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "directories",
+ "gdk4",
+ "glib",
  "gtk4",
  "lazy_static",
  "rand",

@@ -18,7 +18,7 @@ fn main() {
         Context::new_with_tabrmd(TabrmdConfig::default()).expect("Failed to open TPM!"),
     ));
     let key_data = Rc::new(RefCell::new(gui::KeyData::default()));
-    let attendance_data = Rc::new(RefCell::new(gui::AttendanceData::default()));
+    // let attendance_data = Rc::new(RefCell::new(gui::AttendanceData::default()));
     // Set Password session
     // keygen::check_create_keys(&mut *context.borrow_mut());
     // keygen::create_colour_security_values(&mut *context.borrow_mut());
@@ -28,6 +28,17 @@ fn main() {
         .build();
 
     app.connect_activate(move |app: &Application| {
+        // Inspired by the gtk4-rs css example
+        let css_provider = gtk::CssProvider::new();
+        let style = include_bytes!("gui/styles.css");
+
+        css_provider.load_from_data(style);
+        gtk::StyleContext::add_provider_for_display(
+            &gdk::Display::default().expect("Failed to make a GDK display"),
+            &css_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+
         let window = ApplicationWindow::builder()
             .application(app)
             .title("Attendance")
@@ -36,7 +47,6 @@ fn main() {
         window.set_child(Some(&gui::unlock_keys::unlock_keys_widget(
             context.clone(),
             key_data.clone(),
-            attendance_data.clone(),
         )));
 
         window.present();

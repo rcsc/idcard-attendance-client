@@ -16,3 +16,5 @@ lazy_static = "1"
 rpassword = "5"
 gtk = { version = "0.3", package = "gtk4" }
 serialport = "4"
+gdk = { version = "0.3", package = "gdk4" }
+glib = "0.14"
