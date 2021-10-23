@@ -19,7 +19,26 @@ pub fn show_pin_security(dialog_clone: Rc<Dialog>, colour_security: ColourSecuri
         "Showing PIN security, colour_security was chosen as {:?}",
         colour_security
     );
-    dialog_clone.set_child(Some(&Button::with_label("Hello")));
+    let number_grid = Grid::new();
+
+    for row in 0..4 {
+        for column in 0..3 {
+            let num = (row * 3) + column + 1;
+            if num > 9 {
+                // number 11 is actually zero, since if you think about a PIN pad this is how it
+                // works
+                if num == 11 {
+                    let number_button = Button::with_label("0");
+                    number_grid.attach(&number_button, column, row, 1, 1);
+                }
+            } else {
+                let number_button = Button::with_label(&format!("{}", num));
+                number_grid.attach(&number_button, column, row, 1, 1);
+            }
+        }
+    }
+
+    dialog_clone.set_child(Some(&number_grid));
     dialog_clone.show();
 }
 
