@@ -2,7 +2,7 @@ use crate::gui::ColourSecurityValue;
 use gtk::prelude::*;
 use gtk::{
     glib::clone, ApplicationWindow, Box, Button, Dialog, DialogFlags, EventControllerKey, Grid,
-    Label, ResponseType,
+    Label, Orientation, PasswordEntry, ResponseType,
 };
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -12,6 +12,7 @@ use crate::gui::AttendanceData;
 
 lazy_static! {
     static ref KEY_DATA: Mutex<String> = Mutex::new(String::new());
+    static ref SECURITY_PIN: Mutex<u32> = Mutex::new(0);
 }
 
 pub fn show_pin_security(dialog_clone: Rc<Dialog>, colour_security: ColourSecurityValue) {
@@ -19,26 +20,65 @@ pub fn show_pin_security(dialog_clone: Rc<Dialog>, colour_security: ColourSecuri
         "Showing PIN security, colour_security was chosen as {:?}",
         colour_security
     );
+    let display_box = Box::new(Orientation::Vertical, 10);
     let number_grid = Grid::new();
+    let pin_preview = Rc::new(
+        PasswordEntry::builder()
+            .can_focus(false)
+            .editable(false)
+            .show_peek_icon(false)
+            .build(),
+    );
+
+    display_box.append(&*Rc::clone(&pin_preview));
+    display_box.append(&number_grid);
 
     for row in 0..4 {
         for column in 0..3 {
             let num = (row * 3) + column + 1;
-            if num > 9 {
+            let number_button = if num > 9 {
                 // number 11 is actually zero, since if you think about a PIN pad this is how it
                 // works
                 if num == 11 {
-                    let number_button = Button::with_label("0");
-                    number_grid.attach(&number_button, column, row, 1, 1);
+                    Button::with_label("0")
+                } else {
+                    continue;
                 }
             } else {
-                let number_button = Button::with_label(&format!("{}", num));
-                number_grid.attach(&number_button, column, row, 1, 1);
-            }
+                Button::with_label(&format!("{}", num))
+            };
+
+            let pin_preview_closure = Rc::clone(&pin_preview);
+            number_button.connect_clicked(move |btn| {
+                // Unwrapping the
+                let mut locked_security_pin = SECURITY_PIN.lock().unwrap();
+                *locked_security_pin *= 10;
+                *locked_security_pin += {
+                    // If any of the unwraps here fail, then something is wrong.
+                    // We dynamically hard-code the values of the labels to be parseable,
+                    // as they are integers.
+                    let option_label_value = btn.label().unwrap();
+                    option_label_value.as_str().parse::<u32>().unwrap()
+                };
+                pin_preview_closure.set_text(&format!("{}", *locked_security_pin));
+                println!("{}", *locked_security_pin);
+            });
+            // row + 1 since we are attaching the pin_preview in the first row and
+            // want it to be clear
+            number_grid.attach(&number_button, column, row, 1, 1);
         }
     }
 
-    dialog_clone.set_child(Some(&number_grid));
+    dialog_clone.connect_response(|_, response_type| {
+        if let ResponseType::Apply = response_type {
+            println!("Beginning sign-in procedure!");
+            // TODO sign-in code goes here, using
+            // KEY_DATA, SECURITY_PIN, and colour_security
+        }
+    });
+
+    dialog_clone.set_child(Some(&display_box));
+    dialog_clone.add_buttons(&[("Sign In", ResponseType::Apply)]);
     dialog_clone.show();
 }
 
