@@ -18,7 +18,7 @@ fn main() {
         Context::new_with_tabrmd(TabrmdConfig::default()).expect("Failed to open TPM!"),
     ));
     let key_data = Rc::new(RefCell::new(gui::KeyData::default()));
-    // let attendance_data = Rc::new(RefCell::new(gui::AttendanceData::default()));
+
     // Set Password session
     // keygen::check_create_keys(&mut *context.borrow_mut());
     // keygen::create_colour_security_values(&mut *context.borrow_mut());
@@ -44,10 +44,7 @@ fn main() {
             .title("Attendance")
             .build();
 
-        window.set_child(Some(&gui::unlock_keys::unlock_keys_widget(
-            context.clone(),
-            key_data.clone(),
-        )));
+        window.set_child(Some(&gui::unlock_keys::unlock_keys_widget(context.clone())));
 
         window.present();
     });

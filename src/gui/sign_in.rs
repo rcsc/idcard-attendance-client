@@ -1,12 +1,19 @@
-use crate::gui::ColourSecurityValue;
+use crate::{
+    gui::{ColourSecurityValue, KeyData},
+    keygen::APP_DATA,
+    tpm,
+};
+use argon2::{Argon2, PasswordHasher};
 use gtk::prelude::*;
 use gtk::{
     glib::clone, ApplicationWindow, Box, Button, Dialog, DialogFlags, EventControllerKey, Grid,
     Label, Orientation, PasswordEntry, ResponseType,
 };
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::time::Duration;
+use tss_esapi::Context;
 
 use crate::gui::AttendanceData;
 
@@ -15,7 +22,15 @@ lazy_static! {
     static ref SECURITY_PIN: Mutex<u32> = Mutex::new(0);
 }
 
-pub fn show_pin_security(dialog_clone: Rc<Dialog>, colour_security: ColourSecurityValue) {
+// TODO generate a new random string at compile time if we're building in release mode?
+static CONSTANT_SALT: &'static str = "LUAboRsoLUiNJVc5HVBX";
+
+pub fn show_pin_security(
+    dialog_clone: Rc<Dialog>,
+    colour_security: ColourSecurityValue,
+    unlocked_keys: Rc<KeyData>,
+    ctx: Rc<RefCell<Context>>,
+) {
     println!(
         "Showing PIN security, colour_security was chosen as {:?}",
         colour_security
@@ -69,11 +84,55 @@ pub fn show_pin_security(dialog_clone: Rc<Dialog>, colour_security: ColourSecuri
         }
     }
 
-    dialog_clone.connect_response(|_, response_type| {
+    dialog_clone.connect_response(move |_, response_type| {
         if let ResponseType::Apply = response_type {
             println!("Beginning sign-in procedure!");
             // TODO sign-in code goes here, using
             // KEY_DATA, SECURITY_PIN, and colour_security
+
+            // Step 1: AES decrypt the security PIN
+            // Copied from keygen. TODO maybe we can get this to work a different way so it's less painful?
+            let colour_security_dir = APP_DATA.data_dir().join("colour_security");
+            let encryption_data = bincode::deserialize(
+                &std::fs::read(colour_security_dir.join(match colour_security {
+                    ColourSecurityValue::Blue => "blue",
+                    ColourSecurityValue::Green => "green",
+                    ColourSecurityValue::Orange => "orange",
+                    ColourSecurityValue::Red => "red",
+                }))
+                .unwrap(),
+            )
+            .expect("Failed to load encrypted colour security keys for decryption");
+            let decrypted_colour_security_data = String::from_utf8(
+                (*ctx.borrow_mut())
+                    .execute_with_nullauth_session(|ctx| {
+                        tpm::aes_decrypt(
+                            ctx,
+                            // We can unwrap since this SHOULD be Some
+                            unlocked_keys.aes_key_handle.unwrap(),
+                            &encryption_data,
+                        )
+                    })
+                    .expect("Failed to decrypt colour_security data!"),
+            )
+            .expect("Failed to convert decrypted colour_security string into a String");
+
+            // Run argon2 with this newfound data
+            // We are NOT salting passwords.
+            // This would be unnecessary and would not help prevent against attacks.
+            let argon2 = Argon2::default();
+            let hashed_data = argon2
+                .hash_password(
+                    (String::new()
+                        + &(*KEY_DATA.lock().unwrap())
+                        + &decrypted_colour_security_data
+                        + &(*SECURITY_PIN.lock().unwrap()).to_string())
+                        .as_bytes(),
+                    CONSTANT_SALT,
+                )
+                .expect("Failed to hash the provided data")
+                .to_string();
+            println!("hashed_data is {}", hashed_data);
         }
     });
 
@@ -82,7 +141,11 @@ pub fn show_pin_security(dialog_clone: Rc<Dialog>, colour_security: ColourSecuri
     dialog_clone.show();
 }
 
-pub fn scan(window: ApplicationWindow) -> Box {
+pub fn scan(
+    context: Rc<RefCell<Context>>,
+    window: ApplicationWindow,
+    unlocked_keys: KeyData,
+) -> Box {
     let list_box = Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
@@ -100,6 +163,8 @@ pub fn scan(window: ApplicationWindow) -> Box {
 
     let key_controller = EventControllerKey::new();
     let window_clone = window.clone();
+    let unlocked_keys_rc = Rc::new(unlocked_keys);
+
     key_controller.connect_key_pressed(move |event_controller_key, key, key_num, mod_type| {
         println!("pressed {:?} --- {:?}", key.to_unicode(), key.name());
         if let Some(unicode_value) = key.to_unicode() {
@@ -128,10 +193,23 @@ pub fn scan(window: ApplicationWindow) -> Box {
                     .label("Red")
                     .css_classes(vec!["red".to_string()])
                     .build();
+
+                let unlocked_keys_red = Rc::clone(&unlocked_keys_rc);
+                let unlocked_keys_green = Rc::clone(&unlocked_keys_rc);
+                let unlocked_keys_blue = Rc::clone(&unlocked_keys_rc);
+                let unlocked_keys_orange = Rc::clone(&unlocked_keys_rc);
+
+                let ctx_red = Rc::clone(&context);
+                let ctx_green = Rc::clone(&context);
+                let ctx_blue = Rc::clone(&context);
+                let ctx_orange = Rc::clone(&context);
+
                 red.connect_clicked(move |btn| {
                     show_pin_security(
                         Rc::clone(&colour_security_dialog_red),
                         ColourSecurityValue::Red,
+                        unlocked_keys_red.clone(),
+                        ctx_red.clone(),
                     )
                 });
 
@@ -143,6 +221,8 @@ pub fn scan(window: ApplicationWindow) -> Box {
                     show_pin_security(
                         Rc::clone(&colour_security_dialog_green),
                         ColourSecurityValue::Green,
+                        unlocked_keys_green.clone(),
+                        ctx_green.clone(),
                     )
                 });
 
@@ -154,6 +234,8 @@ pub fn scan(window: ApplicationWindow) -> Box {
                     show_pin_security(
                         Rc::clone(&colour_security_dialog_orange),
                         ColourSecurityValue::Orange,
+                        unlocked_keys_orange.clone(),
+                        ctx_blue.clone(),
                     )
                 });
                 let blue = Button::builder()
@@ -164,6 +246,8 @@ pub fn scan(window: ApplicationWindow) -> Box {
                     show_pin_security(
                         Rc::clone(&colour_security_dialog_blue),
                         ColourSecurityValue::Blue,
+                        unlocked_keys_blue.clone(),
+                        ctx_orange.clone(),
                     )
                 });
 

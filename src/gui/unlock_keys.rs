@@ -11,7 +11,7 @@ use crate::{
     keygen::{get_unlocked_key, APP_DATA},
 };
 
-pub fn unlock_keys_widget(context: Rc<RefCell<Context>>, key_data: Rc<RefCell<KeyData>>) -> Box {
+pub fn unlock_keys_widget(context: Rc<RefCell<Context>>) -> Box {
     let list_box = Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
@@ -40,12 +40,14 @@ pub fn unlock_keys_widget(context: Rc<RefCell<Context>>, key_data: Rc<RefCell<Ke
     list_box.append(&unlock_button);
 
     unlock_button.connect_clicked(move |button| {
-        (*key_data.borrow_mut()).aes_key_handle = Some(get_unlocked_key(
+        let mut key_data = KeyData::default();
+
+        key_data.aes_key_handle = Some(get_unlocked_key(
             &mut *context.borrow_mut(),
             hmac_key_password.text().to_string(),
             APP_DATA.data_dir().join("keys").join("aes.key"),
         ));
-        (*key_data.borrow_mut()).hmac_key_handle = Some(get_unlocked_key(
+        key_data.hmac_key_handle = Some(get_unlocked_key(
             &mut *context.borrow_mut(),
             hmac_key_password.text().to_string(),
             APP_DATA.data_dir().join("keys").join("hmac.key"),
@@ -70,7 +72,11 @@ pub fn unlock_keys_widget(context: Rc<RefCell<Context>>, key_data: Rc<RefCell<Ke
 
         // Start signing in now that the key handles are opened
         // the keys are unlocked
-        window.set_child(Some(&crate::gui::sign_in::scan(window.clone())));
+        window.set_child(Some(&crate::gui::sign_in::scan(
+            context.clone(),
+            window.clone(),
+            key_data,
+        )));
     });
 
     list_box
