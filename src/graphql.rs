@@ -26,3 +26,10 @@ pub struct CreateUser;
     query_path = "graphql/list-users.graphql"
 )]
 pub struct ListUsers;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "graphql/attendance-rs-schema.graphql",
+    query_path = "graphql/user-by-uuid.graphql"
+)]
+pub struct UserByUuid;

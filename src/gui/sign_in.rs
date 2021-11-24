@@ -11,7 +11,7 @@ use graphql_client::{reqwest::post_graphql_blocking, GraphQLQuery};
 use gtk::prelude::*;
 use gtk::{
     glib::clone, ApplicationWindow, Box, Button, Dialog, DialogFlags, EventControllerKey, Grid,
-    Label, Orientation, PasswordEntry, ResponseType,
+    Label, Orientation, PasswordEntry, ResponseType, Widget,
 };
 use reqwest::{blocking::Client, header::HeaderMap};
 use std::cell::RefCell;
@@ -30,16 +30,49 @@ lazy_static! {
 // TODO generate a new random string at compile time if we're building in release mode?
 static CONSTANT_SALT: &'static str = "LUAboRsoLUiNJVc5HVBX";
 
+pub fn show_attendance_complete(
+    dialog: &Dialog,
+    user_full_name: String,
+    dialog_buttons: Rc<RefCell<Vec<Widget>>>,
+) {
+    println!("Sign in successful.");
+    let sign_in_label = Label::new(Some(&format!("Welcome, {}!", user_full_name)));
+
+    dialog.connect_response(move |dialog_clone, response_type| {
+        if let ResponseType::Close = response_type {
+            dialog_clone.destroy();
+        }
+    });
+
+    // Clear the dialog buttons so we only have a "close" button on the Dialog
+    for dialog_button in dialog_buttons.borrow_mut().iter() {
+        dialog_button
+            .clone()
+            .downcast::<gtk::Button>()
+            .unwrap()
+            .hide();
+    }
+
+    dialog.set_title(Some("Sign In"));
+    dialog.set_child(Some(&sign_in_label));
+    dialog.add_buttons(&[("Close", ResponseType::Close)]);
+    dialog.show();
+}
+
 pub fn show_pin_security(
     dialog_clone: Rc<Dialog>,
     colour_security: ColourSecurityValue,
     unlocked_keys: Rc<KeyData>,
+    mut dialog_buttons: Rc<RefCell<Vec<Widget>>>,
     ctx: Rc<RefCell<Context>>,
 ) {
     println!(
         "Showing PIN security, colour_security was chosen as {:?}",
         colour_security
     );
+    dialog_buttons
+        .borrow_mut()
+        .push(dialog_clone.add_button("Sign In", ResponseType::Apply));
     let display_box = Box::new(Orientation::Vertical, 10);
     let number_grid = Grid::new();
     let pin_preview = Rc::new(
@@ -89,7 +122,7 @@ pub fn show_pin_security(
         }
     }
 
-    dialog_clone.connect_response(move |_, response_type| {
+    dialog_clone.connect_response(move |dialog_clone_cloned, response_type| {
         if let ResponseType::Apply = response_type {
             println!("Beginning sign-in procedure!");
             // TODO sign-in code goes here, using
@@ -137,6 +170,12 @@ pub fn show_pin_security(
                 )
                 .expect("Failed to hash the provided data")
                 .to_string();
+
+            // Clear these two values from RAM immediately
+            *KEY_DATA.lock().unwrap() = "".to_string();
+            *SECURITY_PIN.lock().unwrap() = 0;
+
+            // TODO please don't print this unless logging has debugging enabled
             println!("hashed_data is {}", hashed_data);
 
             // GraphQL query code goes here
@@ -146,8 +185,6 @@ pub fn show_pin_security(
                 alt_id_value: Some(hashed_data),
             };
 
-            let reqwest_client = Client::new();
-            let request_body = graphql::LogAttendance::build_query(log_attendance_variables);
             let mut headers = HeaderMap::new();
             headers.insert(
                 "Token",
@@ -156,32 +193,71 @@ pub fn show_pin_security(
                     .parse()
                     .expect("Failed to convert token to HeaderValue"),
             );
+            let reqwest_client = Client::builder()
+                .default_headers(headers)
+                .build()
+                .expect("Failed to create GraphQL request client");
+            let request_body = graphql::LogAttendance::build_query(log_attendance_variables);
+            let graphql_endpoint = get_config().attendance_rs_graphql_endpoint + "/graphql";
 
             // TODO the slash in /graphql might not work if the "graphql_endpoint" variable ends with a slash.
             // Do something about this.
             let response = reqwest_client
-                .post(get_config().attendance_rs_graphql_endpoint + "/graphql")
-                .headers(headers)
+                .post(&graphql_endpoint)
                 .json(&request_body)
                 .send()
-                .expect("Failed to send GraphQL request!");
+                .expect("Failed to send GraphQL request to logAttendance!");
+
+            // If it's a failure, we'll show the prompt to have the user choose their
+            // account or create a new one.
             if response.status().is_success() {
                 let response_body: Response<graphql::log_attendance::ResponseData> =
                     response.json().expect("Failed to parse GraphQL response");
                 println!("response_body.errors #{:?}", response_body.errors);
                 if let None = response_body.errors {
                     // Success!
-                    println!(
-                        "response_body.data #{:?}",
-                        response_body.data.unwrap().log_attendance.user_uuid
-                    )
+                    let user_uuid = response_body.data.unwrap().log_attendance.user_uuid;
+                    println!("response_body.data #{:?}", user_uuid);
+
+                    // Query the user's uuid to find their name and provide a friendly message
+                    let user_by_uuid =
+                        graphql::UserByUuid::build_query(graphql::user_by_uuid::Variables {
+                            uuid: Some(user_uuid),
+                        });
+
+                    let user_data_response = reqwest_client
+                        .post(&graphql_endpoint)
+                        .json(&user_by_uuid)
+                        .send()
+                        .expect("Failed to send GraphQL request to find user data!");
+
+                    if user_data_response.status().is_success() {
+                        let user_data_json: Response<graphql::user_by_uuid::ResponseData> =
+                            user_data_response
+                                .json()
+                                .expect("Failed to parse GraphQL response as JSON");
+
+                        println!("user data json errors #{:?}", user_data_json.errors);
+
+                        let user_full_name = user_data_json
+                            .data
+                            .unwrap()
+                            .user_by_uuid
+                            .expect("Expected a user to be returned")
+                            .full_name;
+
+                        show_attendance_complete(
+                            dialog_clone_cloned,
+                            user_full_name,
+                            dialog_buttons.clone(),
+                        );
+                    }
                 }
             }
         }
     });
 
     dialog_clone.set_child(Some(&display_box));
-    dialog_clone.add_buttons(&[("Sign In", ResponseType::Apply)]);
     dialog_clone.show();
 }
 
@@ -223,8 +299,12 @@ pub fn scan(
                     DialogFlags::MODAL
                         | DialogFlags::DESTROY_WITH_PARENT
                         | DialogFlags::USE_HEADER_BAR,
-                    &[("Cancel", ResponseType::Cancel)],
+                    &[],
                 ));
+                let dialog_buttons = Rc::new(RefCell::new(vec![]));
+                dialog_buttons
+                    .borrow_mut()
+                    .push(colour_security_dialog.add_button("Cancel", ResponseType::Cancel));
 
                 let dialog_buttons_grid = Grid::new();
 
@@ -248,11 +328,17 @@ pub fn scan(
                 let ctx_blue = Rc::clone(&context);
                 let ctx_orange = Rc::clone(&context);
 
+                let dialog_buttons_red = Rc::clone(&dialog_buttons);
+                let dialog_buttons_green = Rc::clone(&dialog_buttons);
+                let dialog_buttons_blue = Rc::clone(&dialog_buttons);
+                let dialog_buttons_orange = Rc::clone(&dialog_buttons);
+
                 red.connect_clicked(move |btn| {
                     show_pin_security(
                         Rc::clone(&colour_security_dialog_red),
                         ColourSecurityValue::Red,
                         unlocked_keys_red.clone(),
+                        dialog_buttons_red.clone(),
                         ctx_red.clone(),
                     )
                 });
@@ -266,6 +352,7 @@ pub fn scan(
                         Rc::clone(&colour_security_dialog_green),
                         ColourSecurityValue::Green,
                         unlocked_keys_green.clone(),
+                        dialog_buttons_green.clone(),
                         ctx_green.clone(),
                     )
                 });
@@ -279,7 +366,8 @@ pub fn scan(
                         Rc::clone(&colour_security_dialog_orange),
                         ColourSecurityValue::Orange,
                         unlocked_keys_orange.clone(),
-                        ctx_blue.clone(),
+                        dialog_buttons_orange.clone(),
+                        ctx_orange.clone(),
                     )
                 });
                 let blue = Button::builder()
@@ -291,7 +379,8 @@ pub fn scan(
                         Rc::clone(&colour_security_dialog_blue),
                         ColourSecurityValue::Blue,
                         unlocked_keys_blue.clone(),
-                        ctx_orange.clone(),
+                        dialog_buttons_blue.clone(),
+                        ctx_blue.clone(),
                     )
                 });
 

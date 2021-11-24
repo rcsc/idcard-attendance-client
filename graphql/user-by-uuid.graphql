@@ -1,0 +1,7 @@
+query UserByUuid($uuid: String) {
+	userByUuid(uuid: $uuid) {
+       fullName
+       email
+       uuid
+	}
+}
