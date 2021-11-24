@@ -1,0 +1,8 @@
+mutation LogAttendance($alt_id_field: String, $alt_id_value: String) {
+	logAttendance(altIdField: $alt_id_field, altIdValue: $alt_id_value) {
+		inTime
+		outTime
+		id
+        userUuid
+	}
+}

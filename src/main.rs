@@ -2,6 +2,8 @@
 extern crate lazy_static;
 
 mod colour_security;
+mod config;
+mod graphql;
 mod gui;
 mod keygen;
 mod tpm;

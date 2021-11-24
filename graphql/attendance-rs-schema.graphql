@@ -1,0 +1,72 @@
+# Directs the executor to query only when the field exists.
+directive @ifdef on FIELD
+
+type Attendance {
+  id: Int!
+  inTime: DateTime!
+  outTime: DateTime
+  userUuid: String!
+}
+
+# Implement the DateTime<Utc> scalar
+#
+# The input/output is a string in RFC3339 format.
+scalar DateTime
+
+# A scalar that can represent any JSON Object value.
+scalar JSONObject
+
+type Mutation {
+  createUser(
+    fullName: String!
+    email: String!
+    phoneNumber: String
+    altIdFields: JSONObject
+  ): User!
+  updateUser(
+    uuid: String!
+    fullName: String
+    email: String
+    phoneNumber: String
+  ): User!
+  logAttendance(
+    uuid: String
+    email: String
+    altIdField: String
+    altIdValue: String
+  ): Attendance!
+  generateToken(
+    description: String!
+    capability: TokenCapability!
+    initialValidTime: DateTime
+    expirationTime: DateTime!
+  ): String!
+}
+
+type Query {
+  users: [User!]!
+  userByFullNameSearch(fullName: String!): [User!]!
+  userByFullNameMatch(fullName: String!): [User!]!
+  userByAltIdField(altField: String!, altValue: String!): User
+  userByUuid(uuid: String!): User
+  userByEmail(email: String!): User
+  attendance: [Attendance!]!
+  attendanceByDate(date: DateTime!): [Attendance!]!
+}
+
+enum TokenCapability {
+  COLLECTOR
+  VIEWER
+  ADMINISTRATOR
+}
+
+type User {
+  fullName: String!
+  email: String!
+  phoneNumber: String
+  createTime: DateTime!
+  updateTime: DateTime
+  uuid: String!
+  altIdFields: JSONObject
+  attendance: [Attendance!]!
+}

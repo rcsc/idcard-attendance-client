@@ -1,14 +1,19 @@
 use crate::{
+    config::get_config,
+    graphql,
     gui::{ColourSecurityValue, KeyData},
     keygen::APP_DATA,
     tpm,
 };
 use argon2::{Argon2, PasswordHasher};
+use graphql_client::Response;
+use graphql_client::{reqwest::post_graphql_blocking, GraphQLQuery};
 use gtk::prelude::*;
 use gtk::{
     glib::clone, ApplicationWindow, Box, Button, Dialog, DialogFlags, EventControllerKey, Grid,
     Label, Orientation, PasswordEntry, ResponseType,
 };
+use reqwest::{blocking::Client, header::HeaderMap};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -133,6 +138,45 @@ pub fn show_pin_security(
                 .expect("Failed to hash the provided data")
                 .to_string();
             println!("hashed_data is {}", hashed_data);
+
+            // GraphQL query code goes here
+            // From https://github.com/graphql-rust/graphql-client/blob/main/examples/hasura/examples/hasura.rs
+            let log_attendance_variables = graphql::log_attendance::Variables {
+                alt_id_field: Some("idac-secbarcode-value".to_owned()),
+                alt_id_value: Some(hashed_data),
+            };
+
+            let reqwest_client = Client::new();
+            let request_body = graphql::LogAttendance::build_query(log_attendance_variables);
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "Token",
+                get_config()
+                    .attendance_rs_token
+                    .parse()
+                    .expect("Failed to convert token to HeaderValue"),
+            );
+
+            // TODO the slash in /graphql might not work if the "graphql_endpoint" variable ends with a slash.
+            // Do something about this.
+            let response = reqwest_client
+                .post(get_config().attendance_rs_graphql_endpoint + "/graphql")
+                .headers(headers)
+                .json(&request_body)
+                .send()
+                .expect("Failed to send GraphQL request!");
+            if response.status().is_success() {
+                let response_body: Response<graphql::log_attendance::ResponseData> =
+                    response.json().expect("Failed to parse GraphQL response");
+                println!("response_body.errors #{:?}", response_body.errors);
+                if let None = response_body.errors {
+                    // Success!
+                    println!(
+                        "response_body.data #{:?}",
+                        response_body.data.unwrap().log_attendance.user_uuid
+                    )
+                }
+            }
         }
     });
 
