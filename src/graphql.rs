@@ -19,3 +19,10 @@ pub struct LogAttendance;
     query_path = "graphql/create-user.graphql"
 )]
 pub struct CreateUser;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "graphql/attendance-rs-schema.graphql",
+    query_path = "graphql/list-users.graphql"
+)]
+pub struct ListUsers;

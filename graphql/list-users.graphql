@@ -1,0 +1,7 @@
+query ListUsers($a: String) {
+	users(name: $a) {
+       fullName
+       email
+       uuid
+	}
+}
