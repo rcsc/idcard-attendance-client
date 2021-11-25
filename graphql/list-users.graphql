@@ -1,5 +1,5 @@
-query ListUsers($a: String) {
-	users(name: $a) {
+query ListUsers {
+	users {
        fullName
        email
        uuid

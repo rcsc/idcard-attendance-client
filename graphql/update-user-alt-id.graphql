@@ -1,0 +1,5 @@
+mutation UpdateUserAltID($uuid: String, $alt_id_value: String) {
+    updateUser(uuid: $uuid, altIdFields: { idac_secbarcode_value: $alt_id_value }) {
+        uuid
+    }
+}

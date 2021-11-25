@@ -11,10 +11,11 @@ use graphql_client::{reqwest::post_graphql_blocking, GraphQLQuery};
 use gtk::prelude::*;
 use gtk::{
     glib::clone, ApplicationWindow, Box, Button, Dialog, DialogFlags, EventControllerKey, Grid,
-    Label, Orientation, PasswordEntry, ResponseType, Widget,
+    Label, ListBox, Orientation, PasswordEntry, ResponseType, Widget,
 };
 use reqwest::{blocking::Client, header::HeaderMap};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -31,7 +32,7 @@ lazy_static! {
 static CONSTANT_SALT: &'static str = "LUAboRsoLUiNJVc5HVBX";
 
 pub fn show_attendance_complete(
-    dialog: &Dialog,
+    dialog: Rc<Dialog>,
     user_full_name: String,
     dialog_buttons: Rc<RefCell<Vec<Widget>>>,
 ) {
@@ -57,6 +58,103 @@ pub fn show_attendance_complete(
     dialog.set_child(Some(&sign_in_label));
     dialog.add_buttons(&[("Close", ResponseType::Close)]);
     dialog.show();
+}
+
+pub fn create_user_dialog(dialog: &Dialog, dialog_buttons: Rc<RefCell<Vec<Widget>>>) {
+    unimplemented!()
+}
+
+pub fn choose_user_from_users_dialog(
+    dialog: Rc<Dialog>,
+    mut graphql_client: Client,
+    hashed_data: String,
+    log_attendance_variables: graphql::log_attendance::Variables,
+    dialog_buttons: Rc<RefCell<Vec<Widget>>>,
+) {
+    let users_listbox = ListBox::new();
+    let graphql_endpoint = get_config().attendance_rs_graphql_endpoint + "/graphql";
+    // Get the list of users
+
+    let request_body = graphql::ListUsers::build_query(graphql::list_users::Variables);
+    let response = graphql_client
+        .post(&graphql_endpoint)
+        .json(&request_body)
+        .send()
+        .expect("Failed to send GraphQL request for users!");
+    let mut user_uuid_list = vec![];
+    if response.status().is_success() {
+        let response_body: Response<graphql::list_users::ResponseData> = response
+            .json()
+            .expect("Failed to parse GraphQL response for users");
+        println!("err {:?}", response_body.errors);
+        if let None = response_body.errors {
+            for user in response_body.data.unwrap().users {
+                println!("{:?}", user.full_name);
+                println!("{:?}", user.uuid);
+                users_listbox.append(&Label::new(Some(&format!("{}", user.full_name))));
+                user_uuid_list.push(user.uuid);
+            }
+        }
+    }
+    let dialog_clone = dialog.clone();
+    users_listbox.connect_row_selected(move |listbox, row| {
+        if let Some(row) = row {
+            println!("row selected {}", user_uuid_list[row.index() as usize]);
+            // Link them
+
+            let request_body =
+                graphql::UpdateUserAltID::build_query(graphql::update_user_alt_id::Variables {
+                    uuid: Some(user_uuid_list[row.index() as usize].clone()),
+                    alt_id_value: Some(hashed_data.clone()),
+                });
+            let response = graphql_client
+                .post(&graphql_endpoint)
+                .json(&request_body)
+                .send()
+                .expect("Failed to send GraphQL request for users!");
+            if response.status().is_success() {
+                let response_body: Response<graphql::update_user_alt_id::ResponseData> = response
+                    .json()
+                    .expect("Failed to parse GraphQL response for users");
+                println!("err {:?}", response_body.errors);
+                if let None = response_body.errors {
+                    // resend logAttendance
+                    let response = graphql_client
+                        .post(&graphql_endpoint)
+                        .json(&graphql::LogAttendance::build_query(
+                            graphql::log_attendance::Variables {
+                                alt_id_field: log_attendance_variables.alt_id_field.clone(),
+                                alt_id_value: log_attendance_variables.alt_id_value.clone(),
+                            },
+                        ))
+                        .send()
+                        .expect("Failed to send GraphQL request to logAttendance!");
+
+                    if response.status().is_success() {
+                        let response_body: Response<graphql::log_attendance::ResponseData> =
+                            response.json().expect("Failed to parse GraphQL response");
+                        println!("err {:?}", response_body.errors);
+                        if let None = response_body.errors {
+                            // It worked
+                            show_attendance_complete(
+                                dialog_clone.clone(),
+                                row.child()
+                                    .unwrap()
+                                    .downcast::<gtk::Label>()
+                                    .unwrap()
+                                    .text()
+                                    .to_string(),
+                                dialog_buttons.clone(),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    dialog.set_title(Some("Select User"));
+    dialog.set_child(Some(&users_listbox));
 }
 
 pub fn show_pin_security(
@@ -122,6 +220,8 @@ pub fn show_pin_security(
         }
     }
 
+    let dialog_clone_clone = dialog_clone.clone();
+
     dialog_clone.connect_response(move |dialog_clone_cloned, response_type| {
         if let ResponseType::Apply = response_type {
             println!("Beginning sign-in procedure!");
@@ -181,8 +281,8 @@ pub fn show_pin_security(
             // GraphQL query code goes here
             // From https://github.com/graphql-rust/graphql-client/blob/main/examples/hasura/examples/hasura.rs
             let log_attendance_variables = graphql::log_attendance::Variables {
-                alt_id_field: Some("idac-secbarcode-value".to_owned()),
-                alt_id_value: Some(hashed_data),
+                alt_id_field: Some("idac_secbarcode_value".to_owned()),
+                alt_id_value: Some(hashed_data.clone()),
             };
 
             let mut headers = HeaderMap::new();
@@ -197,7 +297,10 @@ pub fn show_pin_security(
                 .default_headers(headers)
                 .build()
                 .expect("Failed to create GraphQL request client");
-            let request_body = graphql::LogAttendance::build_query(log_attendance_variables);
+            let request_body = graphql::LogAttendance::build_query(graphql::log_attendance::Variables {
+                alt_id_field: log_attendance_variables.alt_id_field.clone(),
+                alt_id_value: log_attendance_variables.alt_id_value.clone()
+            });
             let graphql_endpoint = get_config().attendance_rs_graphql_endpoint + "/graphql";
 
             // TODO the slash in /graphql might not work if the "graphql_endpoint" variable ends with a slash.
@@ -208,12 +311,12 @@ pub fn show_pin_security(
                 .send()
                 .expect("Failed to send GraphQL request to logAttendance!");
 
-            // If it's a failure, we'll show the prompt to have the user choose their
-            // account or create a new one.
             if response.status().is_success() {
                 let response_body: Response<graphql::log_attendance::ResponseData> =
                     response.json().expect("Failed to parse GraphQL response");
                 println!("response_body.errors #{:?}", response_body.errors);
+                // If it's a failure, we'll show the prompt to have the user choose their
+                // account or create a new one.
                 if let None = response_body.errors {
                     // Success!
                     let user_uuid = response_body.data.unwrap().log_attendance.user_uuid;
@@ -247,10 +350,18 @@ pub fn show_pin_security(
                             .full_name;
 
                         show_attendance_complete(
-                            dialog_clone_cloned,
+                            dialog_clone_clone.clone(),
                             user_full_name,
                             dialog_buttons.clone(),
                         );
+                    }
+                } else if let Some(errors) = response_body.errors {
+                    // should be the first error if the user isn't found
+                    if let Some(error) = errors.get(0) {
+                        if error.message == "no rows returned by a query that expected to return at least one row" {
+                            println!("NOTE no users found!");
+                            choose_user_from_users_dialog(dialog_clone_clone.clone(), reqwest_client, hashed_data, log_attendance_variables, dialog_buttons.clone())
+                        }
                     }
                 }
             }

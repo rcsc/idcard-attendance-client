@@ -33,3 +33,10 @@ pub struct ListUsers;
     query_path = "graphql/user-by-uuid.graphql"
 )]
 pub struct UserByUuid;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "graphql/attendance-rs-schema.graphql",
+    query_path = "graphql/update-user-alt-id.graphql"
+)]
+pub struct UpdateUserAltID;
