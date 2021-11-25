@@ -10,8 +10,8 @@ use graphql_client::Response;
 use graphql_client::{reqwest::post_graphql_blocking, GraphQLQuery};
 use gtk::prelude::*;
 use gtk::{
-    glib::clone, ApplicationWindow, Box, Button, Dialog, DialogFlags, EventControllerKey, Grid,
-    Label, ListBox, Orientation, PasswordEntry, ResponseType, Widget,
+    glib::clone, ApplicationWindow, Box, Button, Dialog, DialogFlags, Entry, EventControllerKey,
+    Grid, Label, ListBox, Orientation, PasswordEntry, ResponseType, Widget,
 };
 use reqwest::{blocking::Client, header::HeaderMap};
 use std::cell::RefCell;
@@ -60,8 +60,90 @@ pub fn show_attendance_complete(
     dialog.show();
 }
 
-pub fn create_user_dialog(dialog: &Dialog, dialog_buttons: Rc<RefCell<Vec<Widget>>>) {
-    unimplemented!()
+pub fn create_user_dialog(
+    dialog: Rc<Dialog>,
+    mut graphql_client: Client,
+    hashed_data: String,
+    log_attendance_variables: graphql::log_attendance::Variables,
+    dialog_buttons: Rc<RefCell<Vec<Widget>>>,
+) {
+    let display_box = Box::new(Orientation::Vertical, 10);
+
+    let name = Entry::builder().placeholder_text("Name").build();
+    let email = Entry::builder().placeholder_text("Email").build();
+    let phone = Entry::builder()
+        .placeholder_text("Phone number (optional)")
+        .build();
+
+    display_box.append(&name);
+    display_box.append(&email);
+    display_box.append(&phone);
+
+    let dialog_clone = dialog.clone();
+    let log_attendance_variables_clone = graphql::log_attendance::Variables {
+        alt_id_field: log_attendance_variables.alt_id_field.clone(),
+        alt_id_value: log_attendance_variables.alt_id_value.clone(),
+    };
+    // Change "Sign In" behaviour
+    dialog.connect_response(move |dialog_clone_cloned, response_type| {
+        if let ResponseType::Apply = response_type {
+            let phone_number = phone.text();
+            let email = email.text();
+            let name = name.text();
+            let create_user_variables = graphql::create_user::Variables {
+                phone_number: if phone_number.is_empty() {
+                    None
+                } else {
+                    Some(phone_number.to_string())
+                },
+                email: email.to_string(),
+                full_name: name.to_string(),
+                alt_id_value: hashed_data.clone(),
+            };
+
+            let graphql_endpoint = get_config().attendance_rs_graphql_endpoint + "/graphql";
+            let response = graphql_client
+                .post(&graphql_endpoint)
+                .json(&graphql::CreateUser::build_query(create_user_variables))
+                .send()
+                .expect("Failed to send GraphQL request for users!");
+
+            if response.status().is_success() {
+                let response_body: Response<graphql::create_user::ResponseData> = response
+                    .json()
+                    .expect("Failed to parse GraphQL response for users");
+                println!("createuser error data {:?}", response_body.errors);
+                if let None = response_body.errors {
+                    // literally just copy the thing from choose user from users dialog
+                    let response = graphql_client
+                        .post(&graphql_endpoint)
+                        .json(&graphql::LogAttendance::build_query(
+                            graphql::log_attendance::Variables {
+                                alt_id_field: log_attendance_variables_clone.alt_id_field.clone(),
+                                alt_id_value: log_attendance_variables_clone.alt_id_value.clone(),
+                            },
+                        ))
+                        .send()
+                        .expect("Failed to send GraphQL request to logAttendance!");
+
+                    if response.status().is_success() {
+                        let response_body: Response<graphql::log_attendance::ResponseData> =
+                            response.json().expect("Failed to parse GraphQL response");
+                        println!("err {:?}", response_body.errors);
+                        if let None = response_body.errors {
+                            // It worked
+                            show_attendance_complete(
+                                dialog_clone.clone(),
+                                name.to_string(),
+                                dialog_buttons.clone(),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    });
+    dialog.set_child(Some(&display_box));
 }
 
 pub fn choose_user_from_users_dialog(
@@ -71,7 +153,35 @@ pub fn choose_user_from_users_dialog(
     log_attendance_variables: graphql::log_attendance::Variables,
     dialog_buttons: Rc<RefCell<Vec<Widget>>>,
 ) {
+    let display_box = Box::new(Orientation::Vertical, 10);
     let users_listbox = ListBox::new();
+    display_box.append(&users_listbox);
+    let create_user_btn = Button::with_label("Don't see your name?");
+
+    let dialog_clone_clone_clone = dialog.clone();
+
+    let graphql_client_clone = graphql_client.clone();
+    let hashed_data_clone = hashed_data.clone();
+    let dialog_buttons_clone = dialog_buttons.clone();
+
+    let log_attendance_variables_clone = graphql::log_attendance::Variables {
+        alt_id_field: log_attendance_variables.alt_id_field.clone(),
+        alt_id_value: log_attendance_variables.alt_id_value.clone(),
+    };
+    create_user_btn.connect_clicked(move |btn| {
+        create_user_dialog(
+            dialog_clone_clone_clone.clone(),
+            graphql_client_clone.clone(),
+            hashed_data_clone.clone(),
+            graphql::log_attendance::Variables {
+                alt_id_field: log_attendance_variables_clone.alt_id_field.clone(),
+                alt_id_value: log_attendance_variables_clone.alt_id_value.clone(),
+            },
+            dialog_buttons_clone.clone(),
+        );
+    });
+
+    display_box.append(&create_user_btn);
     let graphql_endpoint = get_config().attendance_rs_graphql_endpoint + "/graphql";
     // Get the list of users
 
@@ -154,7 +264,7 @@ pub fn choose_user_from_users_dialog(
     });
 
     dialog.set_title(Some("Select User"));
-    dialog.set_child(Some(&users_listbox));
+    dialog.set_child(Some(&display_box));
 }
 
 pub fn show_pin_security(

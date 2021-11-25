@@ -1,5 +1,5 @@
-mutation CreateUser($full_name: String, $email: String, $phone_number: String!, $alt_id_fields: String!) {
-	createUser(fullName: $full_name, email: $email, phoneNumber: $phone_number, altIdFields: $altIdFields) {
+mutation CreateUser($full_name: String!, $email: String!, $phone_number: String, $alt_id_value: String!) {
+	createUser(fullName: $full_name, email: $email, phoneNumber: $phone_number, altIdFields: { idac_secbarcode_value: $alt_id_value }) {
          uuid
          fullName
          email
